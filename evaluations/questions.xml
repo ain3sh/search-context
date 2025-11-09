@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<evaluation>
+  <qa_pair>
+    <question>What is the maximum file size limit for uploading to Gemini File Search stores?</question>
+    <answer>100 MB</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What is the default embedding model used by Gemini File Search for indexing?</question>
+    <answer>gemini-embedding-001</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How long do temporary File objects persist before automatic deletion when using uploadToFileSearchStore?</question>
+    <answer>48 hours</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What is the pricing per million tokens for embeddings at indexing time in File Search?</question>
+    <answer>$0.15</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What two Gemini models support the File Search tool?</question>
+    <answer>gemini-2.5-pro and gemini-2.5-flash</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What is the recommended maximum size per FileSearchStore to ensure optimal retrieval latencies?</question>
+    <answer>20 GB</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What parameter controls the maximum number of tokens per chunk in chunking configuration?</question>
+    <answer>max_tokens_per_chunk</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Are query-time embeddings charged or free of charge in File Search?</question>
+    <answer>free of charge</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What is the total storage limit for file search stores on the Free tier?</question>
+    <answer>1 GB</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What technique does File Search use to find information relevant to user prompts?</question>
+    <answer>semantic search</answer>
+  </qa_pair>
+</evaluation>
