@@ -1,0 +1,228 @@
+name: Sync Context Search Stores
+
+on:
+  # Run daily at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Allow manual trigger for testing or immediate updates
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-stores:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for diff since last sync
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install google-genai python-dotenv
+
+      - name: Get last sync timestamp
+        id: last-sync
+        run: |
+          # Check if sync tag exists
+          if git tag -l "last-context-sync" | grep -q "last-context-sync"; then
+            LAST_SYNC_COMMIT=$(git rev-list -n 1 last-context-sync)
+            echo "last_commit=$LAST_SYNC_COMMIT" >> $GITHUB_OUTPUT
+            echo "Last sync commit: $LAST_SYNC_COMMIT"
+          else
+            # First run - sync everything
+            echo "last_commit=" >> $GITHUB_OUTPUT
+            echo "No previous sync found - will sync all directories"
+          fi
+
+      - name: Detect changed directories since last sync
+        id: changed-dirs
+        env:
+          LAST_SYNC_COMMIT: ${{ steps.last-sync.outputs.last_commit }}
+        run: |
+          if [ -z "$LAST_SYNC_COMMIT" ]; then
+            # First sync - get all directories
+            ALL_DIRS=$(find . -maxdepth 2 -type d \
+              -not -path "./.*" \
+              -not -path "./mcp-server*" \
+              -not -path "." | \
+              sed 's|^\./||' | \
+              sort -u | \
+              jq -R -s -c 'split("\n")[:-1]')
+            echo "changed_dirs=$ALL_DIRS" >> $GITHUB_OUTPUT
+            echo "First sync - all directories: $ALL_DIRS"
+          else
+            # Get changed files since last sync
+            CHANGED_FILES=$(git diff --name-only $LAST_SYNC_COMMIT HEAD)
+
+            if [ -z "$CHANGED_FILES" ]; then
+              echo "changed_dirs=[]" >> $GITHUB_OUTPUT
+              echo "No changes since last sync"
+            else
+              # Extract unique top-level directories
+              CHANGED_DIRS=$(echo "$CHANGED_FILES" | \
+                grep -v '^mcp-server/' | \
+                grep -v '^\.github/' | \
+                cut -d'/' -f1-2 | \
+                sort -u | \
+                jq -R -s -c 'split("\n")[:-1]')
+
+              echo "changed_dirs=$CHANGED_DIRS" >> $GITHUB_OUTPUT
+              echo "Changed directories since last sync: $CHANGED_DIRS"
+            fi
+          fi
+
+      - name: Sync FileSearchStores
+        id: sync
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHANGED_DIRS: ${{ steps.changed-dirs.outputs.changed_dirs }}
+        run: |
+          python - <<'EOF'
+          import os
+          import json
+          import time
+          from pathlib import Path
+          from google import genai
+          from google.genai import types
+
+          # Initialize client
+          client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+
+          # Get changed directories
+          changed_dirs = json.loads(os.environ.get('CHANGED_DIRS', '[]'))
+
+          if not changed_dirs:
+              print("No directories changed, skipping sync")
+              exit(0)
+
+          total_cost = 0.0
+
+          for store_name in changed_dirs:
+              print(f"\n{'='*60}")
+              print(f"Processing store: {store_name}")
+              print(f"{'='*60}")
+
+              # Delete existing store if it exists
+              try:
+                  stores = list(client.file_search_stores.list())
+                  existing = [s for s in stores if s.display_name == store_name]
+                  if existing:
+                      print(f"Deleting existing store: {existing[0].name}")
+                      client.file_search_stores.delete(
+                          name=existing[0].name,
+                          config={'force': True}
+                      )
+                      time.sleep(2)  # Wait for deletion to propagate
+              except Exception as e:
+                  print(f"Error deleting store: {e}")
+
+              # Create new store
+              print(f"Creating new FileSearchStore: {store_name}")
+              store = client.file_search_stores.create(
+                  config={'display_name': store_name}
+              )
+
+              # Upload all files in the directory
+              store_path = Path(store_name)
+              files = list(store_path.rglob('*.md')) + \
+                      list(store_path.rglob('*.txt')) + \
+                      list(store_path.rglob('*.py')) + \
+                      list(store_path.rglob('*.js')) + \
+                      list(store_path.rglob('*.json'))
+
+              print(f"Found {len(files)} files to upload")
+
+              operations = []
+              total_tokens = 0
+
+              for file_path in files:
+                  try:
+                      # Calculate tokens (rough estimate: 1 token ≈ 4 chars)
+                      file_size = file_path.stat().st_size
+                      estimated_tokens = file_size // 4
+                      total_tokens += estimated_tokens
+
+                      print(f"Uploading: {file_path}")
+                      op = client.file_search_stores.upload_to_file_search_store(
+                          file=str(file_path),
+                          file_search_store_name=store.name,
+                          config={
+                              'display_name': str(file_path.relative_to(store_path))
+                          }
+                      )
+                      operations.append(op)
+                  except Exception as e:
+                      print(f"Error uploading {file_path}: {e}")
+
+              # Wait for all uploads to complete
+              print("Waiting for uploads to complete...")
+              for i, op in enumerate(operations):
+                  max_retries = 120  # 10 minutes max (120 * 5 seconds)
+                  retry_count = 0
+                  while not op.done:
+                      if retry_count >= max_retries:
+                          raise TimeoutError(f"Upload operation timed out after {max_retries * 5} seconds")
+                      time.sleep(5)
+                      op = client.operations.get(op)
+                      retry_count += 1
+                  print(f"  Upload {i+1}/{len(operations)} complete")
+
+              # Calculate cost
+              cost = (total_tokens / 1_000_000) * 0.15
+              total_cost += cost
+
+              print(f"\nStore '{store_name}' sync complete:")
+              print(f"  - Files indexed: {len(files)}")
+              print(f"  - Estimated tokens: {total_tokens:,}")
+              print(f"  - Cost: ${cost:.4f}")
+
+          print(f"\n{'='*60}")
+          print(f"Total sync cost: ${total_cost:.4f}")
+          print(f"Directories synced: {len(changed_dirs)}")
+          print(f"{'='*60}")
+
+          # Write summary for next step
+          with open('/tmp/sync_summary.txt', 'w') as f:
+              f.write(f"synced_count={len(changed_dirs)}\n")
+              f.write(f"total_cost={total_cost:.4f}\n")
+          EOF
+
+      - name: Tag last sync commit
+        if: steps.sync.outcome == 'success'
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Delete old tag if exists
+          git tag -d last-context-sync || true
+          git push origin :refs/tags/last-context-sync || true
+
+          # Create new tag at current commit
+          git tag -a last-context-sync -m "Last context search sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push origin last-context-sync
+
+          echo "✅ Tagged commit ${{ github.sha }} as last successful sync"
+
+      - name: Report sync status
+        if: always()
+        run: |
+          if [ -f /tmp/sync_summary.txt ]; then
+            source /tmp/sync_summary.txt
+            echo "📊 Sync Summary:"
+            echo "   Directories synced: $synced_count"
+            echo "   Total cost: \$$total_cost"
+            echo "   Next sync: Tomorrow at 2 AM UTC"
+          else
+            echo "⚠️ Sync did not complete successfully"
+          fi
