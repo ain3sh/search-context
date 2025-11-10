@@ -21,10 +21,10 @@ Enables AI agents to search documentation using natural language queries that un
 ### Recommended: npx
 
 ```bash
-npx -y @ain3sh/search-context
+npx -y github:ain3sh/search-context
 ```
 
-No installation or cloning required. Always uses the latest version.
+No installation or cloning required. Always uses the latest version from GitHub.
 
 ### Alternative: From Source
 
@@ -47,7 +47,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "search-context": {
       "command": "npx",
-      "args": ["-y", "@ain3sh/search-context"],
+      "args": ["-y", "github:ain3sh/search-context"],
       "env": {
         "GEMINI_API_KEY": "your_api_key_here"
       }
@@ -68,7 +68,7 @@ Create `.mcp.json` in your project root:
     "search-context": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@ain3sh/search-context"],
+      "args": ["-y", "github:ain3sh/search-context"],
       "env": {
         "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
@@ -357,8 +357,8 @@ timeout 5s GEMINI_API_KEY=your_key npx .
 - Verify `npm run build` completes without errors
 - Check MCP configuration syntax (JSON valid)
 - Review client logs (e.g., `~/Library/Logs/Claude/mcp*.log`)
-- Ensure npx can access npm registry or GitHub
-- Test server manually: `GEMINI_API_KEY=key npx @ain3sh/search-context`
+- Ensure npx can access GitHub
+- Test server manually: `GEMINI_API_KEY=key npx -y github:ain3sh/search-context`
 
 ## GitHub Actions Setup
 
