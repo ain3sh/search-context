@@ -14,7 +14,9 @@ import { GoogleGenAI } from "@google/genai";
 // ---------- Constants ----------
 
 const CHARACTER_LIMIT = 25000;
+const CHUNK_CHAR_LIMIT = 500; // Truncate each chunk preview to 500 chars
 const MODEL_NAME = "gemini-2.5-flash";
+const STORE_CACHE_TTL = 300000; // Cache stores for 5 minutes (300k ms)
 
 // ---------- Logging ----------
 
@@ -35,6 +37,19 @@ enum ResponseFormat {
   JSON = "json"
 }
 
+interface StoreInfo {
+  name: string;
+  displayName: string;
+  createTime?: string;
+  updateTime?: string;
+}
+
+interface StoreCache {
+  stores: Map<string, string>; // displayName -> storeName
+  storeList: StoreInfo[];
+  timestamp: number;
+}
+
 // ---------- Zod Schemas ----------
 
 const SearchContextInputSchema = z.object({
@@ -52,12 +67,15 @@ const SearchContextInputSchema = z.object({
     .min(1, "Query is required")
     .max(500, "Query must not exceed 500 characters")
     .describe("Natural language search query"),
+  include_chunks: z.boolean()
+    .default(false)
+    .describe("Include retrieved document chunks in response (default: false). When false, only returns synthesized answer + sources. When true, includes chunk previews for verification."),
   top_k: z.number()
     .int("top_k must be an integer")
     .min(1, "top_k must be at least 1")
     .max(20, "top_k cannot exceed 20")
-    .default(5)
-    .describe("Number of relevant document chunks to retrieve (1-20)"),
+    .default(3)
+    .describe("Number of relevant document chunks to retrieve (1-20). Only relevant when include_chunks=true."),
   response_format: z.nativeEnum(ResponseFormat)
     .default(ResponseFormat.MARKDOWN)
     .describe("Output format: 'markdown' for human-readable or 'json' for structured data"),
@@ -80,22 +98,9 @@ function formatMarkdownResponse(
   output.push(`# Search Results: ${params.store}\n\n`);
   output.push(`**Query**: ${params.query}\n\n`);
   output.push(`**Response**:\n${mainResponse}\n\n`);
-  output.push(`---\n\n`);
-  output.push(`## Retrieved Context\n\n`);
 
-  // Add top_k chunks with citations
+  // Collect source list
   const chunks = grounding.groundingChunks || [];
-  for (let i = 0; i < Math.min(params.top_k, chunks.length); i++) {
-    const chunk = chunks[i];
-    if (chunk.retrievedContext) {
-      const ctx = chunk.retrievedContext;
-      output.push(`### [${i + 1}] ${ctx.title}\n\n`);
-      output.push(`${ctx.text}\n\n`);
-      output.push(`---\n\n`);
-    }
-  }
-
-  // Add source list
   const sources = new Set<string>();
   for (const chunk of chunks) {
     if (chunk.retrievedContext?.title) {
@@ -103,9 +108,31 @@ function formatMarkdownResponse(
     }
   }
 
+  // Add sources
+  output.push(`---\n\n`);
   output.push(`**Sources** (${sources.size} files):\n`);
   for (const source of Array.from(sources).sort()) {
     output.push(`  - ${source}\n`);
+  }
+
+  // Optionally add chunk previews for verification
+  if (params.include_chunks) {
+    output.push(`\n---\n\n`);
+    output.push(`## Retrieved Context Chunks\n\n`);
+
+    for (let i = 0; i < Math.min(params.top_k, chunks.length); i++) {
+      const chunk = chunks[i];
+      if (chunk.retrievedContext) {
+        const ctx = chunk.retrievedContext;
+        const text = ctx.text.length > CHUNK_CHAR_LIMIT
+          ? ctx.text.slice(0, CHUNK_CHAR_LIMIT) + `... [truncated, ${ctx.text.length - CHUNK_CHAR_LIMIT} chars omitted]`
+          : ctx.text;
+
+        output.push(`### [${i + 1}] ${ctx.title}\n\n`);
+        output.push(`${text}\n\n`);
+        output.push(`---\n\n`);
+      }
+    }
   }
 
   let result = output.join('');
@@ -116,7 +143,7 @@ function formatMarkdownResponse(
     result = truncated + (
       `\n\n[TRUNCATED - Response exceeds ${CHARACTER_LIMIT} characters. ` +
       `Original length: ${result.length}. ` +
-      `Try reducing top_k or using more specific query.]`
+      `Try reducing top_k or disabling include_chunks.]`
     );
   }
 
@@ -132,15 +159,29 @@ function formatJsonResponse(
   const sources = new Set<string>();
   const chunkData: any[] = [];
 
-  for (let i = 0; i < Math.min(params.top_k, chunks.length); i++) {
-    const chunk = chunks[i];
-    if (chunk.retrievedContext) {
-      chunkData.push({
-        title: chunk.retrievedContext.title,
-        text: chunk.retrievedContext.text
-      });
-      if (chunk.retrievedContext.title) {
-        sources.add(chunk.retrievedContext.title);
+  // Collect sources
+  for (const chunk of chunks) {
+    if (chunk.retrievedContext?.title) {
+      sources.add(chunk.retrievedContext.title);
+    }
+  }
+
+  // Optionally include chunk previews
+  if (params.include_chunks) {
+    for (let i = 0; i < Math.min(params.top_k, chunks.length); i++) {
+      const chunk = chunks[i];
+      if (chunk.retrievedContext) {
+        const text = chunk.retrievedContext.text;
+        const truncatedText = text.length > CHUNK_CHAR_LIMIT
+          ? text.slice(0, CHUNK_CHAR_LIMIT)
+          : text;
+
+        chunkData.push({
+          title: chunk.retrievedContext.title,
+          text: truncatedText,
+          truncated: text.length > CHUNK_CHAR_LIMIT,
+          original_length: text.length
+        });
       }
     }
   }
@@ -149,8 +190,8 @@ function formatJsonResponse(
     query: params.query,
     store: params.store,
     response: mainResponse,
-    chunks: chunkData,
-    sources: Array.from(sources).sort()
+    sources: Array.from(sources).sort(),
+    ...(params.include_chunks && { chunks: chunkData })
   };
 
   return JSON.stringify(result, null, 2);
@@ -246,6 +287,57 @@ function handleError(error: unknown): string {
   return `❌ Unexpected error: ${String(error)}\n\nPlease file an issue with steps to reproduce.`;
 }
 
+// ---------- Store Cache Management ----------
+
+let storeCache: StoreCache | null = null;
+
+async function fetchStores(client: GoogleGenAI): Promise<StoreCache> {
+  log('debug', 'Fetching stores from Gemini API');
+  const pager = await client.fileSearchStores.list({ config: { pageSize: 20 } });
+  const stores: any[] = [];
+  let page = pager.page;
+  while (true) {
+    stores.push(...Array.from(page));
+    if (!pager.hasNextPage()) break;
+    page = await pager.nextPage();
+  }
+
+  const storeMap = new Map<string, string>();
+  const storeList: StoreInfo[] = [];
+
+  for (const store of stores) {
+    if (store.displayName && store.name) {
+      storeMap.set(store.displayName, store.name);
+      storeList.push({
+        name: store.name,
+        displayName: store.displayName,
+        createTime: store.createTime,
+        updateTime: store.updateTime
+      });
+    }
+  }
+
+  log('info', 'Stores fetched and cached', { count: stores.length });
+
+  return {
+    stores: storeMap,
+    storeList,
+    timestamp: Date.now()
+  };
+}
+
+async function getStores(client: GoogleGenAI, forceRefresh: boolean = false): Promise<StoreCache> {
+  const now = Date.now();
+
+  if (!forceRefresh && storeCache && (now - storeCache.timestamp) < STORE_CACHE_TTL) {
+    log('debug', 'Using cached stores');
+    return storeCache;
+  }
+
+  storeCache = await fetchStores(client);
+  return storeCache;
+}
+
 // ---------- Tool Implementations ----------
 
 async function searchContext(
@@ -254,26 +346,11 @@ async function searchContext(
 ): Promise<string> {
   log('info', 'searchContext called', { store: params.store, query: params.query.substring(0, 50) });
   try {
-    // List available stores and validate
-    const pager = await client.fileSearchStores.list({ config: { pageSize: 20 } });
-    const stores: any[] = [];
-    let page = pager.page;
-    while (true) {
-      stores.push(...Array.from(page));
-      if (!pager.hasNextPage()) break;
-      page = await pager.nextPage();
-    }
+    // Get stores from cache
+    const cache = await getStores(client);
 
-    const storeMap = new Map<string, string>();
-    for (const store of stores) {
-      if (store.displayName && store.name) {
-        storeMap.set(store.displayName, store.name);
-      }
-    }
-    log('debug', 'Retrieved stores', { count: stores.length });
-
-    if (!storeMap.has(params.store)) {
-      const available = Array.from(storeMap.keys()).sort();
+    if (!cache.stores.has(params.store)) {
+      const available = Array.from(cache.stores.keys()).sort();
       return (
         `Error: Store '${params.store}' not found.\n\n` +
         `Available stores:\n` +
@@ -284,7 +361,7 @@ async function searchContext(
       );
     }
 
-    const storeName = storeMap.get(params.store)!;
+    const storeName = cache.stores.get(params.store)!;
 
     // Query Gemini with file search
     const response = await client.models.generateContent({
@@ -328,65 +405,6 @@ async function searchContext(
   }
 }
 
-async function listStores(client: GoogleGenAI): Promise<string> {
-  try {
-    const pager = await client.fileSearchStores.list({ config: { pageSize: 20 } });
-    const stores: any[] = [];
-    let page = pager.page;
-    while (true) {
-      stores.push(...Array.from(page));
-      if (!pager.hasNextPage()) break;
-      page = await pager.nextPage();
-    }
-
-    if (stores.length === 0) {
-      return (
-        "No FileSearchStores found.\n\n" +
-        "This could mean:\n" +
-        "  - The GitHub Actions sync hasn't run yet\n" +
-        "  - No directories in ain3sh/docs repository to index\n" +
-        "  - API key doesn't have access to the project stores\n\n" +
-        "Check the GitHub Actions workflow logs for more information."
-      );
-    }
-
-    const output: string[] = [];
-    output.push(`# Available Context Stores\n\n`);
-    output.push(`Total: ${stores.length} stores\n\n`);
-
-    // Sort by display name
-    const sortedStores = stores.sort((a: any, b: any) => {
-      const nameA = a.displayName || a.name;
-      const nameB = b.displayName || b.name;
-      return nameA.localeCompare(nameB);
-    });
-
-    for (const store of sortedStores) {
-      const displayName = store.displayName || "(no display name)";
-      output.push(`- **${displayName}**\n`);
-      output.push(`  - ID: \`${store.name}\`\n`);
-      if (store.createTime) {
-        output.push(`  - Created: ${store.createTime}\n`);
-      }
-      if (store.updateTime) {
-        output.push(`  - Updated: ${store.updateTime}\n`);
-      }
-      output.push(`\n`);
-    }
-
-    output.push(`\n**Usage**:\n`);
-    output.push(`\`\`\`\n`);
-    output.push(`search_context(\n`);
-    output.push(`  store: "context",  // Use display name here\n`);
-    output.push(`  query: "your search query"\n`);
-    output.push(`)\n`);
-    output.push(`\`\`\`\n`);
-
-    return output.join('');
-  } catch (error) {
-    return handleError(error);
-  }
-}
 
 // ---------- Main Function ----------
 
@@ -408,6 +426,48 @@ async function main() {
     version: "1.0.0"
   });
 
+  // Register resources for each store dynamically
+  // Fetch stores and register each one as a resource
+  try {
+    const cache = await getStores(client);
+    log('info', 'Registering store resources', { count: cache.storeList.length });
+
+    for (const store of cache.storeList) {
+      const uri = `store://${store.displayName}`;
+      server.registerResource(
+        store.displayName,
+        uri,
+        {
+          title: `${store.displayName} Documentation Store`,
+          description: `FileSearchStore for '${store.displayName}' documentation. Use with search_context tool.`,
+          mimeType: "application/json"
+        },
+        async (resourceUri) => {
+          log('debug', 'Resource read', { uri: resourceUri.href });
+          const content = JSON.stringify({
+            displayName: store.displayName,
+            name: store.name,
+            createTime: store.createTime,
+            updateTime: store.updateTime,
+            usage: `Use this store with search_context tool: { store: "${store.displayName}", query: "your query" }`
+          }, null, 2);
+
+          return {
+            contents: [{
+              uri: resourceUri.href,
+              mimeType: "application/json",
+              text: content
+            }]
+          };
+        }
+      );
+    }
+    log('info', 'Store resources registered successfully');
+  } catch (error) {
+    log('error', 'Failed to register store resources', { error });
+    // Continue anyway - tools can still work even if resources aren't registered
+  }
+
   // Register search_context tool
   server.registerTool(
     "search_context",
@@ -415,28 +475,43 @@ async function main() {
       title: "Search Context Documentation",
       description: `Search documentation using semantic search powered by Gemini File Search API.
 
-Queries FileSearchStores automatically synced from ain3sh/docs repository. Each top-level directory maps to its own FileSearchStore. Returns relevant content with citations showing source files.
+**Simple Usage**: Just provide store name and query. Sane defaults handle everything else.
 
-Args:
-  - store (string): FileSearchStore name (directory path like 'context' or 'Factory-AI/factory')
+Queries FileSearchStores automatically synced from ain3sh/docs repository. Each top-level directory maps to its own FileSearchStore.
+
+**Required Parameters:**
+  - store (string): FileSearchStore name (e.g., 'context', 'Factory-AI/factory')
+    Discover available stores via MCP Resources (resources/list)
   - query (string): Natural language search query
-  - top_k (number): Number of chunks to retrieve (1-20, default: 5)
-  - response_format ('markdown' | 'json'): Output format (default: 'markdown')
-  - metadata_filter (string, optional): Filter by custom metadata (syntax: google.aip.dev/160)
 
-Returns:
-  Markdown format: Human-readable results with headers, context chunks, and source citations
-  JSON format: Structured data with query, response, chunks array, and sources array
+**Optional Parameters (rarely needed):**
+  - include_chunks (boolean, default: false): Include document chunk previews for verification
+    When false: Returns only synthesized answer + source citations (token-efficient)
+    When true: Includes truncated chunk previews (500 chars each) for evidence
+  - top_k (number, default: 3): Number of chunks to retrieve (only relevant if include_chunks=true)
+  - response_format ('markdown' | 'json', default: 'markdown'): Output format
+  - metadata_filter (string): Advanced filtering (syntax: google.aip.dev/160)
 
-Examples:
-  - Use when: "Search Factory-AI docs for authentication flow" -> {store: "Factory-AI/factory", query: "authentication flow"}
-  - Use when: "Find Gemini API usage patterns" -> {store: "context", query: "Gemini API usage", top_k: 3}
-  - Use when: "Find docs authored by Graves" -> {store: "context", query: "book recommendations", metadata_filter: 'author="Robert Graves"'}
+**Default Response** (include_chunks=false):
+  - Synthesized answer from semantic search
+  - Source file citations
+  - ~500-1000 tokens total
 
-Error Handling:
-  - Returns "Error: Store not found" with list of available stores if invalid store name
-  - Returns "No results found" with suggestions if query returns empty
-  - Truncates responses exceeding 25,000 characters with clear message`,
+**With Chunks** (include_chunks=true):
+  - Synthesized answer
+  - Source file citations
+  - Document chunk previews (truncated to 500 chars each)
+  - ~2000-3000 tokens total
+
+**Examples:**
+  - Simple: {store: "context", query: "How does File Search chunking work?"}
+  - With evidence: {store: "context", query: "authentication flow", include_chunks: true}
+  - Advanced filtering: {store: "context", query: "books", metadata_filter: 'author="Robert Graves"'}
+
+**Error Handling:**
+  - Invalid store → Lists available stores
+  - No results → Suggests alternative queries
+  - Responses truncated at 25,000 chars if needed`,
       inputSchema: SearchContextInputSchema.shape,
       annotations: {
         readOnlyHint: true,
@@ -447,40 +522,6 @@ Error Handling:
     },
     async (params: SearchContextInput) => {
       const result = await searchContext(client, params);
-      return {
-        content: [{
-          type: "text" as const,
-          text: result
-        }]
-      };
-    }
-  );
-
-  // Register list_stores tool
-  server.registerTool(
-    "list_stores",
-    {
-      title: "List Available Stores",
-      description: `List all available FileSearchStores for documentation search.
-
-Returns the names of all indexed documentation stores. Use these names as the 'store' parameter in search_context tool calls.
-
-Returns:
-  Markdown-formatted list of available stores with their display names, IDs, and timestamps.
-
-Examples:
-  - Use when: "What documentation stores are available?"
-  - Use when: Need to find the correct store name before searching`,
-      inputSchema: {},
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true
-      }
-    },
-    async () => {
-      const result = await listStores(client);
       return {
         content: [{
           type: "text" as const,
