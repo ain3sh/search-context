@@ -16,10 +16,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout search-context repository (for workflow)
         uses: actions/checkout@v4
         with:
+          path: search-context
           fetch-depth: 0  # Need full history for diff since last sync
+
+      - name: Checkout ain3sh/docs repository (for indexing)
+        uses: actions/checkout@v4
+        with:
+          repository: ain3sh/docs
+          path: docs
+          fetch-depth: 0  # Need full history for change detection
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,6 +41,7 @@ jobs:
       - name: Get last sync timestamp
         id: last-sync
         run: |
+          cd docs
           # Check if sync tag exists
           if git tag -l "last-context-sync" | grep -q "last-context-sync"; then
             LAST_SYNC_COMMIT=$(git rev-list -n 1 last-context-sync)
@@ -49,37 +58,94 @@ jobs:
         env:
           LAST_SYNC_COMMIT: ${{ steps.last-sync.outputs.last_commit }}
         run: |
-          if [ -z "$LAST_SYNC_COMMIT" ]; then
-            # First sync - get all directories
-            ALL_DIRS=$(find . -maxdepth 2 -type d \
-              -not -path "./.*" \
-              -not -path "./mcp-server*" \
-              -not -path "." | \
-              sed 's|^\./||' | \
-              sort -u | \
-              jq -R -s -c 'split("\n")[:-1]')
-            echo "changed_dirs=$ALL_DIRS" >> $GITHUB_OUTPUT
-            echo "First sync - all directories: $ALL_DIRS"
-          else
-            # Get changed files since last sync
-            CHANGED_FILES=$(git diff --name-only $LAST_SYNC_COMMIT HEAD)
+          cd docs
+          CHANGED_DIRS=$(python - <<'EOF'
+          import os
+          import json
+          from pathlib import Path
 
-            if [ -z "$CHANGED_FILES" ]; then
-              echo "changed_dirs=[]" >> $GITHUB_OUTPUT
-              echo "No changes since last sync"
-            else
-              # Extract unique top-level directories
-              CHANGED_DIRS=$(echo "$CHANGED_FILES" | \
-                grep -v '^mcp-server/' | \
-                grep -v '^\.github/' | \
-                cut -d'/' -f1-2 | \
-                sort -u | \
-                jq -R -s -c 'split("\n")[:-1]')
+          def get_indexable_stores(docs_path, max_depth=2):
+              """
+              Find all indexable documentation directories.
+              Only includes directories with files at their root level.
+              Skips empty namespace containers.
+              """
+              indexable = []
 
-              echo "changed_dirs=$CHANGED_DIRS" >> $GITHUB_OUTPUT
-              echo "Changed directories since last sync: $CHANGED_DIRS"
-            fi
-          fi
+              def scan_directory(path, depth=0, prefix=""):
+                  if depth > max_depth:
+                      return
+
+                  # Count files at this directory's root (non-recursive)
+                  files_at_root = sum(1 for f in path.iterdir()
+                                    if f.is_file() and not f.name.startswith('.'))
+
+                  if files_at_root > 0:
+                      # This directory has documentation files - index it
+                      store_name = f"{prefix}{path.name}" if prefix else path.name
+                      indexable.append(store_name)
+                      print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)")
+                  else:
+                      # No files at root - check subdirectories (it's a namespace container)
+                      print(f"  ⏭️  Skipping: {prefix}{path.name} (0 files at root, checking subdirs)")
+                      subdirs = [d for d in path.iterdir()
+                               if d.is_dir() and not d.name.startswith('.')]
+
+                      for subdir in subdirs:
+                          new_prefix = f"{prefix}{path.name}/" if prefix or depth > 0 else f"{path.name}/"
+                          scan_directory(subdir, depth + 1, new_prefix)
+
+              # Scan all top-level directories
+              for item in Path(docs_path).iterdir():
+                  if item.is_dir() and not item.name.startswith('.'):
+                      scan_directory(item, depth=0)
+
+              return indexable
+
+          # Check if this is first sync or incremental
+          last_commit = os.environ.get('LAST_SYNC_COMMIT', '')
+
+          if not last_commit:
+              # First sync - get all indexable stores
+              print("First sync - scanning all directories:")
+              all_stores = get_indexable_stores('.')
+              print(f"\nFound {len(all_stores)} indexable stores: {all_stores}")
+              print(json.dumps(all_stores))
+          else:
+              # Incremental sync - get changed files, then filter to indexable stores
+              import subprocess
+              result = subprocess.run(
+                  ['git', 'diff', '--name-only', last_commit, 'HEAD'],
+                  capture_output=True,
+                  text=True
+              )
+              changed_files = result.stdout.strip().split('\n')
+
+              if not changed_files or changed_files == ['']:
+                  print("No changes since last sync")
+                  print(json.dumps([]))
+              else:
+                  # Extract directories from changed files (up to 2 levels)
+                  changed_paths = set()
+                  for file in changed_files:
+                      if file.startswith('.github/'):
+                          continue
+                      parts = file.split('/')
+                      if len(parts) >= 1:
+                          changed_paths.add(parts[0])
+                      if len(parts) >= 2:
+                          changed_paths.add(f"{parts[0]}/{parts[1]}")
+
+                  # Filter to only indexable stores
+                  all_stores = get_indexable_stores('.')
+                  changed_stores = [s for s in all_stores if s in changed_paths]
+
+                  print(f"\nChanged files in {len(changed_paths)} paths")
+                  print(f"Filtered to {len(changed_stores)} indexable stores: {changed_stores}")
+                  print(json.dumps(changed_stores))
+          EOF
+          )
+          echo "changed_dirs=$CHANGED_DIRS" >> $GITHUB_OUTPUT
 
       - name: Sync FileSearchStores
         id: sync
@@ -120,11 +186,13 @@ jobs:
                       print(f"Deleting existing store: {existing[0].name}")
                       client.file_search_stores.delete(
                           name=existing[0].name,
-                          config={'force': True}
+                          force=True  # ✅ FIXED: Direct parameter, not in config
                       )
                       time.sleep(2)  # Wait for deletion to propagate
               except Exception as e:
-                  print(f"Error deleting store: {e}")
+                  print(f"❌ FATAL: Error deleting store {store_name}: {e}")
+                  print(f"   Skipping this store to avoid duplicate creation")
+                  continue
 
               # Create new store
               print(f"Creating new FileSearchStore: {store_name}")
@@ -132,8 +200,8 @@ jobs:
                   config={'display_name': store_name}
               )
 
-              # Upload all files in the directory
-              store_path = Path(store_name)
+              # Upload all files in the directory from docs repo
+              store_path = Path('docs') / store_name
               files = list(store_path.rglob('*.md')) + \
                       list(store_path.rglob('*.txt')) + \
                       list(store_path.rglob('*.py')) + \
@@ -197,9 +265,10 @@ jobs:
               f.write(f"total_cost={total_cost:.4f}\n")
           EOF
 
-      - name: Tag last sync commit
+      - name: Tag last sync commit in docs repo
         if: steps.sync.outcome == 'success'
         run: |
+          cd docs
           # Configure git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -212,7 +281,8 @@ jobs:
           git tag -a last-context-sync -m "Last context search sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push origin last-context-sync
 
-          echo "✅ Tagged commit ${{ github.sha }} as last successful sync"
+          DOCS_SHA=$(git rev-parse HEAD)
+          echo "✅ Tagged docs commit $DOCS_SHA as last successful sync"
 
       - name: Report sync status
         if: always()
