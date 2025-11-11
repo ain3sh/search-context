@@ -40,22 +40,26 @@ jobs:
 
       - name: Get last sync timestamp (from state file in search-context)
         id: last-sync
+        shell: bash
         run: |
+          set -euo pipefail
           STATE_FILE="search-context/.context-sync/last-docs-commit.txt"
           if [ -f "$STATE_FILE" ]; then
             LAST_SYNC_COMMIT=$(cat "$STATE_FILE")
             echo "Found previous sync marker: $LAST_SYNC_COMMIT"
-            echo "last_commit=$LAST_SYNC_COMMIT" >> $GITHUB_OUTPUT
+            echo "last_commit=$LAST_SYNC_COMMIT" > $GITHUB_OUTPUT
           else
             echo "No previous sync marker file found - full sync will run."
-            echo "last_commit=" >> $GITHUB_OUTPUT
+            echo "last_commit=" > $GITHUB_OUTPUT
           fi
 
       - name: Detect changed directories since last sync
         id: changed-dirs
         env:
           LAST_SYNC_COMMIT: ${{ steps.last-sync.outputs.last_commit }}
+        shell: bash
         run: |
+          set -euo pipefail
           cd docs
           CHANGED_DIRS=$(python - <<'EOF'
           import os
@@ -141,14 +145,16 @@ jobs:
             printf '%s\n' "changed_dirs<<EOF_CHANGED_DIRS"
             printf '%s\n' "$CHANGED_DIRS"
             printf '%s\n' "EOF_CHANGED_DIRS"
-          } >> $GITHUB_OUTPUT
+          } > $GITHUB_OUTPUT
 
       - name: Sync FileSearchStores
         id: sync
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CHANGED_DIRS: ${{ steps.changed-dirs.outputs.changed_dirs }}
+        shell: bash
         run: |
+          set -euo pipefail
           python - <<'EOF'
           import os
           import json
@@ -260,7 +266,9 @@ jobs:
 
       - name: Record last synced docs commit (state file in search-context)
         if: steps.sync.outcome == 'success' && steps.sync.outputs.synced_count != '0'
+        shell: bash
         run: |
+          set -euo pipefail
           DOCS_SHA=$(cd docs && git rev-parse HEAD)
           mkdir -p search-context/.context-sync
           echo "$DOCS_SHA" > search-context/.context-sync/last-docs-commit.txt
@@ -278,7 +286,9 @@ jobs:
 
       - name: Report sync status
         if: always()
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -f /tmp/sync_summary.txt ]; then
             source /tmp/sync_summary.txt
             echo "📊 Sync Summary:"
@@ -288,3 +298,4 @@ jobs:
             echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
           else
             echo "⚠️ Sync did not complete successfully"
+          fi
