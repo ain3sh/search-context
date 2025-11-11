@@ -159,16 +159,11 @@ jobs:
           import os
           import json
           import time
+          import tempfile
+          import shutil
           from pathlib import Path
           from google import genai
           from concurrent.futures import ThreadPoolExecutor, as_completed
-
-          # MIME type mappings for unsupported extensions
-          MIME_TYPE_MAPPINGS = {
-              '.mdx': 'text/markdown',  # MDX is Markdown with JSX - treat as Markdown
-              '.tsx': 'text/tsx',        # TypeScript JSX
-              '.jsx': 'text/jsx',        # JavaScript JSX
-          }
 
           # Minimum file size in bytes (skip empty files)
           MIN_FILE_SIZE = 10
@@ -184,31 +179,42 @@ jobs:
 
           def should_process_file(file_path):
               """Determine if a file should be processed based on extension and size."""
-              # Supported extensions
+              # Supported extensions (including MDX which we'll handle specially)
               extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx'}
-              
+
               # Check extension
               if file_path.suffix.lower() not in extensions:
                   return False
-              
+
               # Check file size
               try:
                   file_size = file_path.stat().st_size
                   if file_size < MIN_FILE_SIZE:
                       return False
-                  
+
                   # Special handling for __init__.py files
                   if file_path.name == '__init__.py' and file_size < 100:
                       return False
               except Exception:
                   return False
-              
+
               return True
 
-          def get_mime_type(file_path):
-              """Get the appropriate MIME type for a file."""
-              suffix = file_path.suffix.lower()
-              return MIME_TYPE_MAPPINGS.get(suffix)
+          def prepare_file_for_upload(file_path, temp_dir):
+              """
+              Prepare a file for upload. For MDX files, create a copy with .md extension.
+              Returns tuple of (upload_path, display_name).
+              """
+              if file_path.suffix.lower() == '.mdx':
+                  # Create a temporary copy with .md extension
+                  temp_name = file_path.stem + '.md'
+                  temp_path = Path(temp_dir) / temp_name
+                  shutil.copy2(file_path, temp_path)
+                  # Keep original name for display
+                  return temp_path, file_path.name
+              else:
+                  # Use original file as-is
+                  return file_path, file_path.name
 
           if not changed_dirs:
               print("No directories changed, skipping sync.")
@@ -245,84 +251,79 @@ jobs:
 
               # Create new store
               print(f"Creating new FileSearchStore: {store_name}")
-              store = client.file_search_stores.create(config={'display_name': store_name})
+              try:
+                  store = client.file_search_stores.create(config={'display_name': store_name})
+              except Exception as e:
+                  print(f"❌ Failed to create store: {e}")
+                  continue
 
               # Collect files with improved filtering
               store_path = Path('docs') / store_name
-              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx'}
               files = []
-              
+              skipped_count = 0
+
               for root, _, filenames in os.walk(store_path):
                   for filename in filenames:
                       file_path = Path(root) / filename
                       if should_process_file(file_path):
                           files.append(file_path)
                       else:
-                          total_files_skipped += 1
+                          skipped_count += 1
 
-              print(f"Found {len(files)} files to upload (skipped {total_files_skipped} files).")
-              
+              total_files_skipped += skipped_count
+              print(f"Found {len(files)} files to upload (skipped {skipped_count} files).")
+
               if len(files) == 0:
                   print("⚠️  No files found after filtering, skipping store.")
                   continue
 
-              # Upload files with improved error handling
-              operations = []
-              total_tokens = 0
-              failed_uploads = []
-              
-              def upload_file(file_path):
-                  """Upload a single file and return operation"""
-                  try:
-                      file_size = file_path.stat().st_size
-                      estimated_tokens = file_size // 4
-                      
-                      # Prepare upload configuration
-                      config = {'display_name': str(file_path.relative_to(store_path))}
-                      
-                      # Get MIME type if needed
-                      mime_type = get_mime_type(file_path)
-                      
-                      # Build upload arguments
-                      upload_kwargs = {
-                          'file': str(file_path),
-                          'file_search_store_name': store.name,
-                          'config': config
-                      }
-                      
-                      # Add MIME type if determined
-                      if mime_type:
-                          upload_kwargs['mime_type'] = mime_type
-                      
-                      op = client.file_search_stores.upload_to_file_search_store(**upload_kwargs)
-                      return (op, estimated_tokens, file_path, None)
-                  except Exception as e:
-                      error_msg = str(e)
-                      # Extract specific error details if available
-                      if hasattr(e, '__dict__'):
-                          if 'code' in e.__dict__:
-                              error_msg = f"{e.code}: {error_msg}"
-                      return (None, 0, file_path, error_msg)
-              
-              # Upload files in parallel (max 10 concurrent)
-              print("Uploading files in parallel...")
-              with ThreadPoolExecutor(max_workers=10) as executor:
-                  futures = {executor.submit(upload_file, f): f for f in files}
-                  
-                  for i, future in enumerate(as_completed(futures), 1):
-                      op, tokens, file_path, error = future.result()
-                      if error:
-                          total_files_failed += 1
-                          failed_uploads.append((file_path.name, error))
-                          # Only show first few errors inline
-                          if total_files_failed <= 5:
-                              print(f"  ❌ [{i}/{len(files)}] Error: {file_path.name}: {error}")
-                      else:
-                          operations.append(op)
-                          total_tokens += tokens
-                          total_files_uploaded += 1
-                          if i % 10 == 0 or i == len(files):
-                              print(f"  ✅ [{i}/{len(files)}] queued")
+              # Create temporary directory for MDX file conversion
+              with tempfile.TemporaryDirectory() as temp_dir:
+                  # Upload files with improved error handling
+                  operations = []
+                  total_tokens = 0
+                  failed_uploads = []
+
+                  def upload_file(file_path):
+                      """Upload a single file and return operation"""
+                      try:
+                          # Prepare file (convert MDX if needed)
+                          upload_path, display_name = prepare_file_for_upload(file_path, temp_dir)
+
+                          file_size = upload_path.stat().st_size
+                          estimated_tokens = file_size // 4
+
+                          # Upload using the prepared path
+                          op = client.file_search_stores.upload_to_file_search_store(
+                              file=str(upload_path),
+                              file_search_store_name=store.name,
+                              config={'display_name': display_name}
+                          )
+
+                          return (op, estimated_tokens, file_path, None)
+                      except Exception as e:
+                          error_msg = str(e)
+                          return (None, 0, file_path, error_msg)
+
+                  # Upload files in parallel (max 10 concurrent)
+                  print("Uploading files in parallel...")
+                  with ThreadPoolExecutor(max_workers=10) as executor:
+                      futures = {executor.submit(upload_file, f): f for f in files}
+
+                      for i, future in enumerate(as_completed(futures), 1):
+                          op, tokens, file_path, error = future.result()
+                          if error:
+                              total_files_failed += 1
+                              failed_uploads.append((file_path.name, error))
+                              # Only show first few errors inline
+                              if total_files_failed <= 5:
+                                  print(f"  ❌ [{i}/{len(files)}] Error: {file_path.name}: {error}")
+                          else:
+                              operations.append(op)
+                              total_tokens += tokens
+                              total_files_uploaded += 1
+                              if i % 10 == 0 or i == len(files):
+                                  print(f"  ✅ [{i}/{len(files)}] queued")
 
               # Wait for uploads to complete
               if operations:
@@ -331,12 +332,12 @@ jobs:
                   max_wait = 600  # 10 minutes max
                   start_time = time.time()
                   last_report = 0
-                  
+
                   while completed < len(operations):
                       if time.time() - start_time > max_wait:
                           print(f"⚠️  Timeout: {completed}/{len(operations)} completed")
                           break
-                      
+
                       # Check all operations in batch
                       newly_completed = 0
                       for i, op in enumerate(operations):
@@ -347,14 +348,14 @@ jobs:
                                       newly_completed += 1
                               except Exception:
                                   pass  # Ignore errors in status checks
-                      
+
                       completed += newly_completed
-                      
+
                       # Report progress every 10 completions or when done
                       if newly_completed > 0 and (completed - last_report >= 10 or completed == len(operations)):
                           print(f"  [{completed}/{len(operations)}] completed")
                           last_report = completed
-                      
+
                       if completed < len(operations):
                           time.sleep(2)  # Poll every 2s
 
@@ -363,12 +364,16 @@ jobs:
 
               print(f"\n✅ Store '{store_name}' sync complete:")
               print(f"   Files indexed: {len(operations)}")
-              print(f"   Files skipped: {total_files_skipped}")
+              print(f"   Files skipped: {skipped_count}")
               if failed_uploads:
                   print(f"   Files failed: {len(failed_uploads)}")
+                  # Show MDX conversion note if any MDX files were processed
+                  mdx_count = sum(1 for f in files if f.suffix.lower() == '.mdx')
+                  if mdx_count > 0:
+                      print(f"   MDX files converted: {mdx_count}")
               print(f"   Estimated tokens: {total_tokens:,}")
               print(f"   Cost: ${cost:.4f}")
-              
+
               # Show summary of failures if there were many
               if len(failed_uploads) > 5:
                   print(f"\n⚠️  Total of {len(failed_uploads)} files failed to upload")
@@ -390,7 +395,7 @@ jobs:
               f.write(f"files_failed={total_files_failed}\n")
 
           write_output("synced_count", len(changed_dirs))
-          
+
           # Exit with error if failure rate is too high
           if total_files_uploaded + total_files_failed > 0:
               failure_rate = total_files_failed / (total_files_uploaded + total_files_failed)
@@ -434,7 +439,7 @@ jobs:
             echo "   Total cost: \$$total_cost"
             echo "   State file path: search-context/.context-sync/last-docs-commit.txt"
             echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
-            
+
             # Show warning if there were failures
             if [ "${files_failed:-0}" -gt 0 ]; then
               echo ""
