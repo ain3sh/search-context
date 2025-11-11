@@ -193,7 +193,10 @@ jobs:
                   existing = [s for s in stores if s.display_name == store_name]
                   if existing:
                       print(f"Deleting existing store: {existing[0].name}")
-                      client.file_search_stores.delete(name=existing[0].name)
+                      client.file_search_stores.delete(
+                          name=existing[0].name,
+                          config={'force': True}  # Cascade delete all documents and chunks
+                      )
                       time.sleep(2)
               except Exception as e:
                   print(f"❌ Error deleting store {store_name}: {e}")
