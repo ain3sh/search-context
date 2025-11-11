@@ -209,6 +209,7 @@ jobs:
               store_path = Path('docs') / store_name
               files = (
                   list(store_path.rglob('*.md')) +
+                  list(store_path.rglob('*.mdx')) +
                   list(store_path.rglob('*.txt')) +
                   list(store_path.rglob('*.py')) +
                   list(store_path.rglob('*.js')) +
