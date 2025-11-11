@@ -47,10 +47,10 @@ jobs:
           if [ -f "$STATE_FILE" ]; then
             LAST_SYNC_COMMIT=$(cat "$STATE_FILE")
             echo "Found previous sync marker: $LAST_SYNC_COMMIT"
-            echo "last_commit=$LAST_SYNC_COMMIT" > $GITHUB_OUTPUT
+            echo "last_commit=$LAST_SYNC_COMMIT" >> $GITHUB_OUTPUT
           else
             echo "No previous sync marker file found - full sync will run."
-            echo "last_commit=" > $GITHUB_OUTPUT
+            echo "last_commit=" >> $GITHUB_OUTPUT
           fi
 
       - name: Detect changed directories since last sync
@@ -145,7 +145,7 @@ jobs:
             printf '%s\n' "changed_dirs<<EOF_CHANGED_DIRS"
             printf '%s\n' "$CHANGED_DIRS"
             printf '%s\n' "EOF_CHANGED_DIRS"
-          } > $GITHUB_OUTPUT
+          } >> $GITHUB_OUTPUT
 
       - name: Sync FileSearchStores
         id: sync
@@ -163,6 +163,16 @@ jobs:
           from google import genai
           from concurrent.futures import ThreadPoolExecutor, as_completed
 
+          # MIME type mappings for unsupported extensions
+          MIME_TYPE_MAPPINGS = {
+              '.mdx': 'text/markdown',  # MDX is Markdown with JSX - treat as Markdown
+              '.tsx': 'text/tsx',        # TypeScript JSX
+              '.jsx': 'text/jsx',        # JavaScript JSX
+          }
+
+          # Minimum file size in bytes (skip empty files)
+          MIN_FILE_SIZE = 10
+
           client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
           changed_dirs = json.loads(os.environ.get('CHANGED_DIRS', '[]'))
 
@@ -171,6 +181,34 @@ jobs:
               if out:
                   with open(out, 'a') as f:
                       f.write(f"{key}={value}\n")
+
+          def should_process_file(file_path):
+              """Determine if a file should be processed based on extension and size."""
+              # Supported extensions
+              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx'}
+              
+              # Check extension
+              if file_path.suffix.lower() not in extensions:
+                  return False
+              
+              # Check file size
+              try:
+                  file_size = file_path.stat().st_size
+                  if file_size < MIN_FILE_SIZE:
+                      return False
+                  
+                  # Special handling for __init__.py files
+                  if file_path.name == '__init__.py' and file_size < 100:
+                      return False
+              except Exception:
+                  return False
+              
+              return True
+
+          def get_mime_type(file_path):
+              """Get the appropriate MIME type for a file."""
+              suffix = file_path.suffix.lower()
+              return MIME_TYPE_MAPPINGS.get(suffix)
 
           if not changed_dirs:
               print("No directories changed, skipping sync.")
@@ -181,6 +219,9 @@ jobs:
               exit(0)
 
           total_cost = 0.0
+          total_files_uploaded = 0
+          total_files_skipped = 0
+          total_files_failed = 0
 
           for store_name in changed_dirs:
               print(f"\n{'='*60}")
@@ -206,25 +247,29 @@ jobs:
               print(f"Creating new FileSearchStore: {store_name}")
               store = client.file_search_stores.create(config={'display_name': store_name})
 
-              # OPTIMIZATION: Use os.walk for robust file discovery
+              # Collect files with improved filtering
               store_path = Path('docs') / store_name
-              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json'}
+              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx'}
               files = []
               
               for root, _, filenames in os.walk(store_path):
                   for filename in filenames:
-                      if Path(filename).suffix.lower() in extensions:
-                          files.append(Path(root) / filename)
+                      file_path = Path(root) / filename
+                      if should_process_file(file_path):
+                          files.append(file_path)
+                      else:
+                          total_files_skipped += 1
 
-              print(f"Found {len(files)} files to upload.")
+              print(f"Found {len(files)} files to upload (skipped {total_files_skipped} files).")
               
               if len(files) == 0:
-                  print("⚠️  No files found, skipping store.")
+                  print("⚠️  No files found after filtering, skipping store.")
                   continue
 
-              # OPTIMIZATION: Parallel upload with ThreadPoolExecutor
+              # Upload files with improved error handling
               operations = []
               total_tokens = 0
+              failed_uploads = []
               
               def upload_file(file_path):
                   """Upload a single file and return operation"""
@@ -232,14 +277,32 @@ jobs:
                       file_size = file_path.stat().st_size
                       estimated_tokens = file_size // 4
                       
-                      op = client.file_search_stores.upload_to_file_search_store(
-                          file=str(file_path),
-                          file_search_store_name=store.name,
-                          config={'display_name': str(file_path.relative_to(store_path))}
-                      )
+                      # Prepare upload configuration
+                      config = {'display_name': str(file_path.relative_to(store_path))}
+                      
+                      # Get MIME type if needed
+                      mime_type = get_mime_type(file_path)
+                      
+                      # Build upload arguments
+                      upload_kwargs = {
+                          'file': str(file_path),
+                          'file_search_store_name': store.name,
+                          'config': config
+                      }
+                      
+                      # Add MIME type if determined
+                      if mime_type:
+                          upload_kwargs['mime_type'] = mime_type
+                      
+                      op = client.file_search_stores.upload_to_file_search_store(**upload_kwargs)
                       return (op, estimated_tokens, file_path, None)
                   except Exception as e:
-                      return (None, 0, file_path, str(e))
+                      error_msg = str(e)
+                      # Extract specific error details if available
+                      if hasattr(e, '__dict__'):
+                          if 'code' in e.__dict__:
+                              error_msg = f"{e.code}: {error_msg}"
+                      return (None, 0, file_path, error_msg)
               
               # Upload files in parallel (max 10 concurrent)
               print("Uploading files in parallel...")
@@ -249,61 +312,91 @@ jobs:
                   for i, future in enumerate(as_completed(futures), 1):
                       op, tokens, file_path, error = future.result()
                       if error:
-                          print(f"  ❌ [{i}/{len(files)}] Error: {file_path.name}: {error}")
+                          total_files_failed += 1
+                          failed_uploads.append((file_path.name, error))
+                          # Only show first few errors inline
+                          if total_files_failed <= 5:
+                              print(f"  ❌ [{i}/{len(files)}] Error: {file_path.name}: {error}")
                       else:
                           operations.append(op)
                           total_tokens += tokens
+                          total_files_uploaded += 1
                           if i % 10 == 0 or i == len(files):
                               print(f"  ✅ [{i}/{len(files)}] queued")
 
-              # OPTIMIZATION: Batch polling with reduced sleep
-              print(f"\nWaiting for {len(operations)} uploads to complete...")
-              completed = 0
-              max_wait = 600  # 10 minutes max
-              start_time = time.time()
-              last_report = 0
-              
-              while completed < len(operations):
-                  if time.time() - start_time > max_wait:
-                      print(f"⚠️  Timeout: {completed}/{len(operations)} completed")
-                      break
+              # Wait for uploads to complete
+              if operations:
+                  print(f"Waiting for {len(operations)} uploads to complete...")
+                  completed = 0
+                  max_wait = 600  # 10 minutes max
+                  start_time = time.time()
+                  last_report = 0
                   
-                  # Check all operations in batch
-                  newly_completed = 0
-                  for i, op in enumerate(operations):
-                      if not op.done:
-                          operations[i] = client.operations.get(op)
-                          if operations[i].done:
-                              newly_completed += 1
-                  
-                  completed += newly_completed
-                  
-                  # Report progress every 10 completions or when done
-                  if newly_completed > 0 and (completed - last_report >= 10 or completed == len(operations)):
-                      print(f"  [{completed}/{len(operations)}] completed")
-                      last_report = completed
-                  
-                  if completed < len(operations):
-                      time.sleep(2)  # Poll every 2s instead of 5s
+                  while completed < len(operations):
+                      if time.time() - start_time > max_wait:
+                          print(f"⚠️  Timeout: {completed}/{len(operations)} completed")
+                          break
+                      
+                      # Check all operations in batch
+                      newly_completed = 0
+                      for i, op in enumerate(operations):
+                          if not op.done:
+                              try:
+                                  operations[i] = client.operations.get(op)
+                                  if operations[i].done:
+                                      newly_completed += 1
+                              except Exception:
+                                  pass  # Ignore errors in status checks
+                      
+                      completed += newly_completed
+                      
+                      # Report progress every 10 completions or when done
+                      if newly_completed > 0 and (completed - last_report >= 10 or completed == len(operations)):
+                          print(f"  [{completed}/{len(operations)}] completed")
+                          last_report = completed
+                      
+                      if completed < len(operations):
+                          time.sleep(2)  # Poll every 2s
 
               cost = (total_tokens / 1_000_000) * 0.15
               total_cost += cost
 
               print(f"\n✅ Store '{store_name}' sync complete:")
               print(f"   Files indexed: {len(operations)}")
+              print(f"   Files skipped: {total_files_skipped}")
+              if failed_uploads:
+                  print(f"   Files failed: {len(failed_uploads)}")
               print(f"   Estimated tokens: {total_tokens:,}")
               print(f"   Cost: ${cost:.4f}")
+              
+              # Show summary of failures if there were many
+              if len(failed_uploads) > 5:
+                  print(f"\n⚠️  Total of {len(failed_uploads)} files failed to upload")
 
           print(f"\n{'='*60}")
-          print(f"✅ Total sync cost: ${total_cost:.4f}")
+          print(f"✅ Total sync summary:")
           print(f"   Directories synced: {len(changed_dirs)}")
+          print(f"   Files uploaded: {total_files_uploaded}")
+          print(f"   Files skipped: {total_files_skipped}")
+          print(f"   Files failed: {total_files_failed}")
+          print(f"   Total cost: ${total_cost:.4f}")
           print(f"{'='*60}")
 
           with open('/tmp/sync_summary.txt', 'w') as f:
               f.write(f"synced_count={len(changed_dirs)}\n")
               f.write(f"total_cost={total_cost:.4f}\n")
+              f.write(f"files_uploaded={total_files_uploaded}\n")
+              f.write(f"files_skipped={total_files_skipped}\n")
+              f.write(f"files_failed={total_files_failed}\n")
 
           write_output("synced_count", len(changed_dirs))
+          
+          # Exit with error if failure rate is too high
+          if total_files_uploaded + total_files_failed > 0:
+              failure_rate = total_files_failed / (total_files_uploaded + total_files_failed)
+              if failure_rate > 0.2:  # More than 20% failure rate
+                  print(f"\n❌ High failure rate: {failure_rate:.1%}")
+                  exit(1)
           EOF
 
       - name: Record last synced docs commit (state file in search-context)
@@ -335,9 +428,18 @@ jobs:
             source /tmp/sync_summary.txt
             echo "📊 Sync Summary:"
             echo "   Directories synced: $synced_count"
+            echo "   Files uploaded: ${files_uploaded:-0}"
+            echo "   Files skipped: ${files_skipped:-0}"
+            echo "   Files failed: ${files_failed:-0}"
             echo "   Total cost: \$$total_cost"
             echo "   State file path: search-context/.context-sync/last-docs-commit.txt"
             echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
+            
+            # Show warning if there were failures
+            if [ "${files_failed:-0}" -gt 0 ]; then
+              echo ""
+              echo "⚠️  Warning: $files_failed files failed to upload"
+            fi
           else
             echo "⚠️ Sync did not complete successfully"
           fi
