@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout search-context repository (for workflow)
+      - name: Checkout search-context repository (for workflow & state file)
         uses: actions/checkout@v4
         with:
           path: search-context
-          fetch-depth: 0  # Need full history for diff since last sync
+          fetch-depth: 0
 
       - name: Checkout ain3sh/docs repository (for indexing)
         uses: actions/checkout@v4
@@ -38,19 +38,17 @@ jobs:
         run: |
           pip install google-genai python-dotenv
 
-      - name: Get last sync timestamp
+      - name: Get last sync timestamp (from state file in search-context)
         id: last-sync
         run: |
-          cd docs
-          # Check if sync tag exists
-          if git tag -l "last-context-sync" | grep -q "last-context-sync"; then
-            LAST_SYNC_COMMIT=$(git rev-list -n 1 last-context-sync)
+          STATE_FILE="search-context/.context-sync/last-docs-commit.txt"
+          if [ -f "$STATE_FILE" ]; then
+            LAST_SYNC_COMMIT=$(cat "$STATE_FILE")
+            echo "Found previous sync marker: $LAST_SYNC_COMMIT"
             echo "last_commit=$LAST_SYNC_COMMIT" >> $GITHUB_OUTPUT
-            echo "Last sync commit: $LAST_SYNC_COMMIT"
           else
-            # First run - sync everything
+            echo "No previous sync marker file found - full sync will run."
             echo "last_commit=" >> $GITHUB_OUTPUT
-            echo "No previous sync found - will sync all directories"
           fi
 
       - name: Detect changed directories since last sync
@@ -77,43 +75,38 @@ jobs:
                   if depth > max_depth:
                       return
 
-                  # Count files at this directory's root (non-recursive)
-                  files_at_root = sum(1 for f in path.iterdir()
-                                    if f.is_file() and not f.name.startswith('.'))
+                  files_at_root = sum(
+                      1 for f in path.iterdir()
+                      if f.is_file() and not f.name.startswith('.')
+                  )
 
                   if files_at_root > 0:
-                      # This directory has documentation files - index it
                       store_name = f"{prefix}{path.name}" if prefix else path.name
                       indexable.append(store_name)
                       print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)", file=sys.stderr)
                   else:
-                      # No files at root - check subdirectories (it's a namespace container)
                       print(f"  ⏭️  Skipping: {prefix}{path.name} (0 files at root, checking subdirs)", file=sys.stderr)
-                      subdirs = [d for d in path.iterdir()
-                               if d.is_dir() and not d.name.startswith('.')]
-
+                      subdirs = [
+                          d for d in path.iterdir()
+                          if d.is_dir() and not d.name.startswith('.')
+                      ]
                       for subdir in subdirs:
                           new_prefix = f"{prefix}{path.name}/" if prefix or depth > 0 else f"{path.name}/"
                           scan_directory(subdir, depth + 1, new_prefix)
 
-              # Scan all top-level directories
               for item in Path(docs_path).iterdir():
                   if item.is_dir() and not item.name.startswith('.'):
                       scan_directory(item, depth=0)
 
               return indexable
 
-          # Check if this is first sync or incremental
           last_commit = os.environ.get('LAST_SYNC_COMMIT', '')
 
           if not last_commit:
-              # First sync - get all indexable stores
-              print("First sync - scanning all directories:", file=sys.stderr)
+              print("First (or full) sync - scanning all directories", file=sys.stderr)
               all_stores = get_indexable_stores('.')
-              print(f"\nFound {len(all_stores)} indexable stores: {all_stores}", file=sys.stderr)
               print(json.dumps(all_stores))
           else:
-              # Incremental sync - get changed files, then filter to indexable stores
               import subprocess
               result = subprocess.run(
                   ['git', 'diff', '--name-only', last_commit, 'HEAD'],
@@ -126,23 +119,21 @@ jobs:
                   print("No changes since last sync", file=sys.stderr)
                   print(json.dumps([]))
               else:
-                  # Extract directories from changed files (up to 2 levels)
                   changed_paths = set()
                   for file in changed_files:
                       if file.startswith('.github/'):
                           continue
                       parts = file.split('/')
-                      if len(parts) >= 1:
+                      if parts:
                           changed_paths.add(parts[0])
                       if len(parts) >= 2:
                           changed_paths.add(f"{parts[0]}/{parts[1]}")
 
-                  # Filter to only indexable stores
                   all_stores = get_indexable_stores('.')
                   changed_stores = [s for s in all_stores if s in changed_paths]
 
-                  print(f"\nChanged files in {len(changed_paths)} paths", file=sys.stderr)
-                  print(f"Filtered to {len(changed_stores)} indexable stores: {changed_stores}", file=sys.stderr)
+                  print(f"Changed paths considered: {len(changed_paths)}", file=sys.stderr)
+                  print(f"Filtered to indexable changed stores: {changed_stores}", file=sys.stderr)
                   print(json.dumps(changed_stores))
           EOF
           )
@@ -164,16 +155,23 @@ jobs:
           import time
           from pathlib import Path
           from google import genai
-          from google.genai import types
 
-          # Initialize client
           client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
-
-          # Get changed directories
           changed_dirs = json.loads(os.environ.get('CHANGED_DIRS', '[]'))
 
+          def write_output(key, value):
+              out = os.environ.get('GITHUB_OUTPUT')
+              if out:
+                  with open(out, 'a') as f:
+                      f.write(f"{key}={value}\n")
+
           if not changed_dirs:
-              print("No directories changed, skipping sync")
+              print("No directories changed, skipping sync.")
+              write_output("synced_count", 0)
+              # Provide an empty summary file for later step
+              with open('/tmp/sync_summary.txt', 'w') as f:
+                  f.write("synced_count=0\n")
+                  f.write("total_cost=0.0000\n")
               exit(0)
 
           total_cost = 0.0
@@ -183,44 +181,37 @@ jobs:
               print(f"Processing store: {store_name}")
               print(f"{'='*60}")
 
-              # Delete existing store if it exists
+              # Delete existing store if present
               try:
                   stores = list(client.file_search_stores.list())
                   existing = [s for s in stores if s.display_name == store_name]
                   if existing:
                       print(f"Deleting existing store: {existing[0].name}")
-                      client.file_search_stores.delete(
-                          name=existing[0].name,
-                          force=True  # ✅ FIXED: Direct parameter, not in config
-                      )
-                      time.sleep(2)  # Wait for deletion to propagate
+                      client.file_search_stores.delete(name=existing[0].name)
+                      time.sleep(2)
               except Exception as e:
-                  print(f"❌ FATAL: Error deleting store {store_name}: {e}")
-                  print(f"   Skipping this store to avoid duplicate creation")
-                  continue
+                  print(f"❌ Error deleting store {store_name}: {e}")
+                  print("   Skipping deletion and continuing with creation attempt.")
 
               # Create new store
               print(f"Creating new FileSearchStore: {store_name}")
-              store = client.file_search_stores.create(
-                  config={'display_name': store_name}
+              store = client.file_search_stores.create(config={'display_name': store_name})
+
+              store_path = Path('docs') / store_name
+              files = (
+                  list(store_path.rglob('*.md')) +
+                  list(store_path.rglob('*.txt')) +
+                  list(store_path.rglob('*.py')) +
+                  list(store_path.rglob('*.js')) +
+                  list(store_path.rglob('*.json'))
               )
 
-              # Upload all files in the directory from docs repo
-              store_path = Path('docs') / store_name
-              files = list(store_path.rglob('*.md')) + \
-                      list(store_path.rglob('*.txt')) + \
-                      list(store_path.rglob('*.py')) + \
-                      list(store_path.rglob('*.js')) + \
-                      list(store_path.rglob('*.json'))
-
-              print(f"Found {len(files)} files to upload")
-
+              print(f"Found {len(files)} files to upload.")
               operations = []
               total_tokens = 0
 
               for file_path in files:
                   try:
-                      # Calculate tokens (rough estimate: 1 token ≈ 4 chars)
                       file_size = file_path.stat().st_size
                       estimated_tokens = file_size // 4
                       total_tokens += estimated_tokens
@@ -229,65 +220,61 @@ jobs:
                       op = client.file_search_stores.upload_to_file_search_store(
                           file=str(file_path),
                           file_search_store_name=store.name,
-                          config={
-                              'display_name': str(file_path.relative_to(store_path))
-                          }
+                          config={'display_name': str(file_path.relative_to(store_path))}
                       )
                       operations.append(op)
                   except Exception as e:
                       print(f"Error uploading {file_path}: {e}")
 
-              # Wait for all uploads to complete
               print("Waiting for uploads to complete...")
               for i, op in enumerate(operations):
-                  max_retries = 120  # 10 minutes max (120 * 5 seconds)
-                  retry_count = 0
+                  max_retries = 120
+                  retries = 0
                   while not op.done:
-                      if retry_count >= max_retries:
-                          raise TimeoutError(f"Upload operation timed out after {max_retries * 5} seconds")
+                      if retries >= max_retries:
+                          raise TimeoutError("Upload operation timed out")
                       time.sleep(5)
                       op = client.operations.get(op)
-                      retry_count += 1
+                      retries += 1
                   print(f"  Upload {i+1}/{len(operations)} complete")
 
-              # Calculate cost
               cost = (total_tokens / 1_000_000) * 0.15
               total_cost += cost
 
               print(f"\nStore '{store_name}' sync complete:")
-              print(f"  - Files indexed: {len(files)}")
-              print(f"  - Estimated tokens: {total_tokens:,}")
-              print(f"  - Cost: ${cost:.4f}")
+              print(f"  Files indexed: {len(files)}")
+              print(f"  Estimated tokens: {total_tokens:,}")
+              print(f"  Cost: ${cost:.4f}")
 
           print(f"\n{'='*60}")
           print(f"Total sync cost: ${total_cost:.4f}")
           print(f"Directories synced: {len(changed_dirs)}")
           print(f"{'='*60}")
 
-          # Write summary for next step
           with open('/tmp/sync_summary.txt', 'w') as f:
               f.write(f"synced_count={len(changed_dirs)}\n")
               f.write(f"total_cost={total_cost:.4f}\n")
+
+          write_output("synced_count", len(changed_dirs))
           EOF
 
-      - name: Tag last sync commit in docs repo
-        if: steps.sync.outcome == 'success'
+      - name: Record last synced docs commit (state file in search-context)
+        if: steps.sync.outcome == 'success' && steps.sync.outputs.synced_count != '0'
         run: |
-          cd docs
-          # Configure git
+          DOCS_SHA=$(cd docs && git rev-parse HEAD)
+          mkdir -p search-context/.context-sync
+          echo "$DOCS_SHA" > search-context/.context-sync/last-docs-commit.txt
+          cd search-context
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Delete old tag if exists
-          git tag -d last-context-sync || true
-          git push origin :refs/tags/last-context-sync || true
-
-          # Create new tag at current commit
-          git tag -a last-context-sync -m "Last context search sync: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push origin last-context-sync
-
-          DOCS_SHA=$(git rev-parse HEAD)
-          echo "✅ Tagged docs commit $DOCS_SHA as last successful sync"
+          if git diff --quiet .context-sync/last-docs-commit.txt; then
+            echo "State file unchanged; no commit needed."
+          else
+            git add .context-sync/last-docs-commit.txt
+            git commit -m "chore: update last synced docs commit to $DOCS_SHA"
+            git push origin HEAD:main
+            echo "Recorded and pushed docs commit $DOCS_SHA"
+          fi
 
       - name: Report sync status
         if: always()
@@ -297,7 +284,7 @@ jobs:
             echo "📊 Sync Summary:"
             echo "   Directories synced: $synced_count"
             echo "   Total cost: \$$total_cost"
-            echo "   Next sync: Tomorrow at 2 AM UTC"
+            echo "   State file path: search-context/.context-sync/last-docs-commit.txt"
+            echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
           else
             echo "⚠️ Sync did not complete successfully"
-          fi
