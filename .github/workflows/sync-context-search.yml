@@ -61,6 +61,7 @@ jobs:
           cd docs
           CHANGED_DIRS=$(python - <<'EOF'
           import os
+          import sys
           import json
           from pathlib import Path
 
@@ -84,10 +85,10 @@ jobs:
                       # This directory has documentation files - index it
                       store_name = f"{prefix}{path.name}" if prefix else path.name
                       indexable.append(store_name)
-                      print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)")
+                      print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)", file=sys.stderr)
                   else:
                       # No files at root - check subdirectories (it's a namespace container)
-                      print(f"  ⏭️  Skipping: {prefix}{path.name} (0 files at root, checking subdirs)")
+                      print(f"  ⏭️  Skipping: {prefix}{path.name} (0 files at root, checking subdirs)", file=sys.stderr)
                       subdirs = [d for d in path.iterdir()
                                if d.is_dir() and not d.name.startswith('.')]
 
@@ -107,9 +108,9 @@ jobs:
 
           if not last_commit:
               # First sync - get all indexable stores
-              print("First sync - scanning all directories:")
+              print("First sync - scanning all directories:", file=sys.stderr)
               all_stores = get_indexable_stores('.')
-              print(f"\nFound {len(all_stores)} indexable stores: {all_stores}")
+              print(f"\nFound {len(all_stores)} indexable stores: {all_stores}", file=sys.stderr)
               print(json.dumps(all_stores))
           else:
               # Incremental sync - get changed files, then filter to indexable stores
@@ -122,7 +123,7 @@ jobs:
               changed_files = result.stdout.strip().split('\n')
 
               if not changed_files or changed_files == ['']:
-                  print("No changes since last sync")
+                  print("No changes since last sync", file=sys.stderr)
                   print(json.dumps([]))
               else:
                   # Extract directories from changed files (up to 2 levels)
@@ -140,12 +141,16 @@ jobs:
                   all_stores = get_indexable_stores('.')
                   changed_stores = [s for s in all_stores if s in changed_paths]
 
-                  print(f"\nChanged files in {len(changed_paths)} paths")
-                  print(f"Filtered to {len(changed_stores)} indexable stores: {changed_stores}")
+                  print(f"\nChanged files in {len(changed_paths)} paths", file=sys.stderr)
+                  print(f"Filtered to {len(changed_stores)} indexable stores: {changed_stores}", file=sys.stderr)
                   print(json.dumps(changed_stores))
           EOF
           )
-          echo "changed_dirs=$CHANGED_DIRS" >> $GITHUB_OUTPUT
+          {
+            printf '%s\n' "changed_dirs<<EOF_CHANGED_DIRS"
+            printf '%s\n' "$CHANGED_DIRS"
+            printf '%s\n' "EOF_CHANGED_DIRS"
+          } >> $GITHUB_OUTPUT
 
       - name: Sync FileSearchStores
         id: sync
