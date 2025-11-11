@@ -161,6 +161,7 @@ jobs:
           import time
           from pathlib import Path
           from google import genai
+          from concurrent.futures import ThreadPoolExecutor, as_completed
 
           client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
           changed_dirs = json.loads(os.environ.get('CHANGED_DIRS', '[]'))
@@ -174,7 +175,6 @@ jobs:
           if not changed_dirs:
               print("No directories changed, skipping sync.")
               write_output("synced_count", 0)
-              # Provide an empty summary file for later step
               with open('/tmp/sync_summary.txt', 'w') as f:
                   f.write("synced_count=0\n")
                   f.write("total_cost=0.0000\n")
@@ -195,70 +195,108 @@ jobs:
                       print(f"Deleting existing store: {existing[0].name}")
                       client.file_search_stores.delete(
                           name=existing[0].name,
-                          config={'force': True}  # Cascade delete all documents and chunks
+                          config={'force': True}
                       )
                       time.sleep(2)
               except Exception as e:
                   print(f"❌ Error deleting store {store_name}: {e}")
-                  print("   Skipping deletion and continuing with creation attempt.")
+                  print("   Continuing with creation attempt.")
 
               # Create new store
               print(f"Creating new FileSearchStore: {store_name}")
               store = client.file_search_stores.create(config={'display_name': store_name})
 
+              # OPTIMIZATION: Use os.walk for robust file discovery
               store_path = Path('docs') / store_name
-              files = (
-                  list(store_path.rglob('*.md')) +
-                  list(store_path.rglob('*.mdx')) +
-                  list(store_path.rglob('*.txt')) +
-                  list(store_path.rglob('*.py')) +
-                  list(store_path.rglob('*.js')) +
-                  list(store_path.rglob('*.json'))
-              )
+              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json'}
+              files = []
+              
+              for root, _, filenames in os.walk(store_path):
+                  for filename in filenames:
+                      if Path(filename).suffix.lower() in extensions:
+                          files.append(Path(root) / filename)
 
               print(f"Found {len(files)} files to upload.")
+              
+              if len(files) == 0:
+                  print("⚠️  No files found, skipping store.")
+                  continue
+
+              # OPTIMIZATION: Parallel upload with ThreadPoolExecutor
               operations = []
               total_tokens = 0
-
-              for file_path in files:
+              
+              def upload_file(file_path):
+                  """Upload a single file and return operation"""
                   try:
                       file_size = file_path.stat().st_size
                       estimated_tokens = file_size // 4
-                      total_tokens += estimated_tokens
-
-                      print(f"Uploading: {file_path}")
+                      
                       op = client.file_search_stores.upload_to_file_search_store(
                           file=str(file_path),
                           file_search_store_name=store.name,
                           config={'display_name': str(file_path.relative_to(store_path))}
                       )
-                      operations.append(op)
+                      return (op, estimated_tokens, file_path, None)
                   except Exception as e:
-                      print(f"Error uploading {file_path}: {e}")
+                      return (None, 0, file_path, str(e))
+              
+              # Upload files in parallel (max 10 concurrent)
+              print("Uploading files in parallel...")
+              with ThreadPoolExecutor(max_workers=10) as executor:
+                  futures = {executor.submit(upload_file, f): f for f in files}
+                  
+                  for i, future in enumerate(as_completed(futures), 1):
+                      op, tokens, file_path, error = future.result()
+                      if error:
+                          print(f"  ❌ [{i}/{len(files)}] Error: {file_path.name}: {error}")
+                      else:
+                          operations.append(op)
+                          total_tokens += tokens
+                          if i % 10 == 0 or i == len(files):
+                              print(f"  ✅ [{i}/{len(files)}] queued")
 
-              print("Waiting for uploads to complete...")
-              for i, op in enumerate(operations):
-                  max_retries = 120
-                  retries = 0
-                  while not op.done:
-                      if retries >= max_retries:
-                          raise TimeoutError("Upload operation timed out")
-                      time.sleep(5)
-                      op = client.operations.get(op)
-                      retries += 1
-                  print(f"  Upload {i+1}/{len(operations)} complete")
+              # OPTIMIZATION: Batch polling with reduced sleep
+              print(f"\nWaiting for {len(operations)} uploads to complete...")
+              completed = 0
+              max_wait = 600  # 10 minutes max
+              start_time = time.time()
+              last_report = 0
+              
+              while completed < len(operations):
+                  if time.time() - start_time > max_wait:
+                      print(f"⚠️  Timeout: {completed}/{len(operations)} completed")
+                      break
+                  
+                  # Check all operations in batch
+                  newly_completed = 0
+                  for i, op in enumerate(operations):
+                      if not op.done:
+                          operations[i] = client.operations.get(op)
+                          if operations[i].done:
+                              newly_completed += 1
+                  
+                  completed += newly_completed
+                  
+                  # Report progress every 10 completions or when done
+                  if newly_completed > 0 and (completed - last_report >= 10 or completed == len(operations)):
+                      print(f"  [{completed}/{len(operations)}] completed")
+                      last_report = completed
+                  
+                  if completed < len(operations):
+                      time.sleep(2)  # Poll every 2s instead of 5s
 
               cost = (total_tokens / 1_000_000) * 0.15
               total_cost += cost
 
-              print(f"\nStore '{store_name}' sync complete:")
-              print(f"  Files indexed: {len(files)}")
-              print(f"  Estimated tokens: {total_tokens:,}")
-              print(f"  Cost: ${cost:.4f}")
+              print(f"\n✅ Store '{store_name}' sync complete:")
+              print(f"   Files indexed: {len(operations)}")
+              print(f"   Estimated tokens: {total_tokens:,}")
+              print(f"   Cost: ${cost:.4f}")
 
           print(f"\n{'='*60}")
-          print(f"Total sync cost: ${total_cost:.4f}")
-          print(f"Directories synced: {len(changed_dirs)}")
+          print(f"✅ Total sync cost: ${total_cost:.4f}")
+          print(f"   Directories synced: {len(changed_dirs)}")
           print(f"{'='*60}")
 
           with open('/tmp/sync_summary.txt', 'w') as f:
