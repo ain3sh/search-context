@@ -75,7 +75,7 @@ def main():
             try:
                 client.file_search_stores.delete(
                     name=store_id,
-                    force=True  # ✅ CORRECT SYNTAX (direct parameter)
+                    config={'force': True}  # Cascade delete all documents and chunks
                 )
                 print(f"   ✅ Successfully deleted\n")
                 deleted_count += 1
