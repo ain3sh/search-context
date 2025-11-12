@@ -28,7 +28,8 @@ MIN_FILE_SIZE = 10
 SUPPORTED_EXTENSIONS = {
     ".md", ".mdx", ".txt",
     ".py", ".js", ".json",
-    ".ts", ".tsx", ".jsx", ".rst"
+    ".ts", ".tsx", ".jsx",
+    ".rst", ".pdf"
 }
 
 
