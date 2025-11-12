@@ -34,3 +34,9 @@ yarn-error.log*
 # Temporary files
 *.tmp
 .cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
