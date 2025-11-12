@@ -1,8 +1,6 @@
 name: Sync Context Search Stores
 
 on:
-  schedule:
-    - cron: '0 2 * * *'    # 2 AM UTC daily
   workflow_dispatch:
   repository_dispatch:
     types: [docs-updated]
