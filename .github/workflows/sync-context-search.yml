@@ -1,11 +1,8 @@
 name: Sync Context Search Stores
 
 on:
-  # Run daily at 2 AM UTC
   schedule:
     - cron: '0 2 * * *'
-
-  # Allow manual trigger for testing or immediate updates
   workflow_dispatch:
 
 permissions:
@@ -47,10 +44,10 @@ jobs:
           if [ -f "$STATE_FILE" ]; then
             LAST_SYNC_DOCS_COMMIT=$(cat "$STATE_FILE")
             echo "Found previous sync marker: $LAST_SYNC_DOCS_COMMIT"
-            echo "last_commit=$LAST_SYNC_DOCS_COMMIT" >> $GITHUB_OUTPUT
+            echo "last_docs_commit=$LAST_SYNC_DOCS_COMMIT" >> "$GITHUB_OUTPUT"
           else
             echo "No previous sync marker file found - full sync will run."
-            echo "last_commit=" >> $GITHUB_OUTPUT
+            echo "last_docs_commit=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Detect changed directories since last sync
@@ -58,12 +55,12 @@ jobs:
         env:
           DOCS_PATH: docs
           MAX_DEPTH: 2
-          LAST_SYNC_DOCS_COMMIT: ${{ steps.last-sync.outputs.last_commit }}
+          LAST_SYNC_DOCS_COMMIT: ${{ steps.last-sync.outputs.last_docs_commit }}
         shell: bash
         run: |
           set -euo pipefail
-          cd docs
-          python ../search-context/.github/scripts/detect_changed_dirs.py
+          # Run from repo root; script uses DOCS_PATH
+          python search-context/.github/scripts/detect_changed_dirs.py
 
       - name: Sync FileSearchStores
         id: sync
@@ -83,6 +80,7 @@ jobs:
           set -euo pipefail
           DOCS_SHA=$(cd docs && git rev-parse HEAD)
           mkdir -p search-context/.context-sync
+            # (Re)write state file
           echo "$DOCS_SHA" > search-context/.context-sync/last-docs-commit.txt
           cd search-context
           git config user.name "github-actions[bot]"
@@ -102,20 +100,19 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f /tmp/sync_summary.txt ]; then
+            # shellcheck disable=SC1091
             source /tmp/sync_summary.txt
             echo "📊 Sync Summary:"
-            echo "   Directories synced: $synced_count"
+            echo "   Directories synced: ${synced_count:-0}"
             echo "   Files uploaded: ${files_uploaded:-0}"
             echo "   Files skipped: ${files_skipped:-0}"
             echo "   Files failed: ${files_failed:-0}"
-            echo "   Total cost: \$$total_cost"
+            echo "   Total cost: $${total_cost:-0.0000}"
             echo "   State file path: search-context/.context-sync/last-docs-commit.txt"
             echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
-
-            # Show warning if there were failures
             if [ "${files_failed:-0}" -gt 0 ]; then
               echo ""
-              echo "⚠️  Warning: $files_failed files failed to upload"
+              echo "⚠️  Warning: ${files_failed} files failed to upload"
             fi
           else
             echo "⚠️ Sync did not complete successfully"
