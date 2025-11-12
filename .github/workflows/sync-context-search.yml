@@ -76,7 +76,7 @@ jobs:
           python search-context/.github/scripts/sync_stores.py
 
       - name: Record last synced docs commit (state file in search-context)
-        if: steps.sync.outcome == 'success' && steps.sync.outputs.synced_count != '0'
+        if: steps.sync.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
