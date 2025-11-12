@@ -180,7 +180,7 @@ jobs:
           def should_process_file(file_path):
               """Determine if a file should be processed based on extension and size."""
               # Supported extensions (including MDX which we'll handle specially)
-              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx'}
+              extensions = {'.md', '.mdx', '.txt', '.py', '.js', '.json', '.ts', '.tsx', '.jsx', '.rst'}
 
               # Check extension
               if file_path.suffix.lower() not in extensions:
