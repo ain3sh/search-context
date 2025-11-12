@@ -4,6 +4,11 @@ node_modules/
 # Build output
 dist/
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
 # Environment variables
 .env
 .env.local
