@@ -104,22 +104,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          DOCS_SHA=$(cd docs && git rev-parse HEAD)
-          mkdir -p search-context/.context-sync
-          echo "$DOCS_SHA" > search-context/.context-sync/last-docs-commit.txt
+          # Compute the docs HEAD we just synced
+          DOCS_SHA="$(cd docs && git rev-parse HEAD)"
 
+          # Work inside the search-context repo
           cd search-context
 
-          # Make sure we're on main and up to date
+          # Configure committer and ensure we're clean and up-to-date first
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B main
-          git pull --rebase origin main
 
-          # Stage first so untracked files are considered by the diff
+          # Make sure local main tracks remote and is current on a clean tree
+          git fetch --prune origin
+          git checkout -B main origin/main
+          git -c rebase.autoStash=true pull --rebase origin main
+
+          # Now write the state file and commit if it changed
+          mkdir -p .context-sync
+          echo "$DOCS_SHA" > .context-sync/last-docs-commit.txt
+
           git add .context-sync/last-docs-commit.txt
-
-          # Commit only if there is a staged change
           if git diff --cached --quiet; then
             echo "State file unchanged; no commit needed."
           else
