@@ -2,7 +2,7 @@ name: Sync Context Search Stores
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * *'    # 2 AM UTC daily
   workflow_dispatch:
   repository_dispatch:
     types: [docs-updated]
@@ -10,23 +10,34 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: sync-context-stores
+  cancel-in-progress: false
+
 jobs:
   sync-stores:
     runs-on: ubuntu-latest
 
     steps:
+      # Repo containing the workflow and the state file we commit
       - name: Checkout search-context repository (for workflow & state file)
         uses: actions/checkout@v4
         with:
+          repository: ain3sh/search-context
           path: search-context
           fetch-depth: 0
+          persist-credentials: true
+          ref: main
 
+      # Repo whose contents we index
       - name: Checkout ain3sh/docs repository (for indexing)
         uses: actions/checkout@v4
         with:
           repository: ain3sh/docs
           path: docs
           fetch-depth: 0  # Need full history for change detection
+          persist-credentials: true
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,6 +46,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           pip install google-genai python-dotenv
 
       - name: Get last sync timestamp (from state file in search-context)
@@ -61,10 +73,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Run from repo root; script uses DOCS_PATH
+          # Runs from workspace root; script uses DOCS_PATH, MAX_DEPTH, LAST_SYNC_DOCS_COMMIT
           python search-context/.github/scripts/detect_changed_dirs.py
 
-      - name: Sync FileSearchStores
+      - name: Sync FileSearchStores (with retries)
         id: sync
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -73,24 +85,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python search-context/.github/scripts/sync_stores.py
+          attempts=0
+          max_attempts=3
+          backoff=10
+          until python search-context/.github/scripts/sync_stores.py; do
+            code=$?
+            attempts=$((attempts+1))
+            if [ $attempts -ge $max_attempts ]; then
+              echo "Sync failed after ${attempts} attempts (last exit $code)."
+              exit $code
+            fi
+            echo "Sync attempt ${attempts} failed (exit $code). Retrying in ${backoff}s..."
+            sleep $backoff
+            backoff=$((backoff*2))
+          done
 
       - name: Record last synced docs commit (state file in search-context)
         if: steps.sync.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
+
           DOCS_SHA=$(cd docs && git rev-parse HEAD)
           mkdir -p search-context/.context-sync
-            # (Re)write state file
           echo "$DOCS_SHA" > search-context/.context-sync/last-docs-commit.txt
+
           cd search-context
+
+          # Make sure we're on main and up to date
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet .context-sync/last-docs-commit.txt; then
+          git checkout -B main
+          git pull --rebase origin main
+
+          # Stage first so untracked files are considered by the diff
+          git add .context-sync/last-docs-commit.txt
+
+          # Commit only if there is a staged change
+          if git diff --cached --quiet; then
             echo "State file unchanged; no commit needed."
           else
-            git add .context-sync/last-docs-commit.txt
             git commit -m "chore: update last synced docs commit to $DOCS_SHA"
             git push origin HEAD:main
             echo "Recorded and pushed docs commit $DOCS_SHA"
@@ -109,7 +143,8 @@ jobs:
             echo "   Files uploaded: ${files_uploaded:-0}"
             echo "   Files skipped: ${files_skipped:-0}"
             echo "   Files failed: ${files_failed:-0}"
-            echo "   Total cost: $${total_cost:-0.0000}"
+            # Print a literal $ followed by the expanded value
+            echo "   Total cost: \$${total_cost:-0.0000}"
             echo "   State file path: search-context/.context-sync/last-docs-commit.txt"
             echo "   Next scheduled sync: Tomorrow at 2 AM UTC"
             if [ "${files_failed:-0}" -gt 0 ]; then
