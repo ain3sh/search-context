@@ -6,7 +6,7 @@ Behavior:
 - Reads env: DOCS_PATH (default 'docs'), MAX_DEPTH (default 2), LAST_SYNC_DOCS_COMMIT.
 - If LAST_SYNC_DOCS_COMMIT is unset: full discovery of indexable stores (directories
   with ≥1 non-hidden file at their own root), honoring MAX_DEPTH and skipping hidden
-dirs/files. Output JSON list.
+  dirs/files. Output JSON list.
 - If set: First run a sanity check inside DOCS_PATH: `git cat-file -e <sha>^{commit}`.
   If it fails, log warning and fall back to full discovery (do NOT crash the workflow).
   Otherwise run `git diff --name-only <sha>..HEAD` (cwd=DOCS_PATH) and map changed
@@ -32,12 +32,11 @@ def get_indexable_stores(docs_path, max_depth=2):
     """
     indexable = []
 
-    def scan_directory(path, depth=0, prefix=""):
+    def scan_directory(path: Path, depth=0, prefix=""):
         if depth > max_depth:
             return
-
         try:
-            entries = [p for p in path.iterdir() if not p.name.startswith('.')]  
+            entries = [p for p in path.iterdir() if not p.name.startswith('.')]
         except FileNotFoundError:
             return
 
@@ -56,26 +55,27 @@ def get_indexable_stores(docs_path, max_depth=2):
 
     root = Path(docs_path)
     if not root.exists():
+        # Idempotent guard: return empty list if DOCS_PATH doesn't exist
         return []
 
     for item in root.iterdir():
-        if item.is_dir() and not item.name.startswith('.'):  
+        if item.is_dir() and not item.name.startswith('.'):
             scan_directory(item, depth=0)
 
     return indexable
 
 
 def write_github_output(key, value):
-    """Write output to GITHUB_OUTPUT using multiline format"""
+    """
+    Write output to GITHUB_OUTPUT using multiline heredoc format.
+    Format: key<<EOF_KEY\nvalue\nEOF_KEY\n
+    """
     github_output = os.environ.get('GITHUB_OUTPUT')
     if github_output:
         with open(github_output, 'a') as f:
-            f.write(f'{key}<<EOF_{key.upper()}
-')
-            f.write(f'{value}
-')
-            f.write(f'EOF_{key.upper()}
-')
+            f.write(f'{key}<<EOF_{key.upper()}\n')
+            f.write(f'{value}\n')
+            f.write(f'EOF_{key.upper()}\n')
 
 
 def main():
@@ -126,14 +126,12 @@ def main():
             return
 
         changed_files = [l.strip() for l in result.stdout.split('\n') if l.strip()]
-
         if not changed_files:
             print("No changes since last sync", file=sys.stderr)
             changed_dirs_json = json.dumps([])
         else:
             # Get all indexable stores first
             all_stores = get_indexable_stores(docs_path, max_depth)
-
             # Map changed files to stores with precise prefix matching
             changed_stores = set()
             for file_path in changed_files:
@@ -142,12 +140,14 @@ def main():
                 if parts[0].startswith('.github') or any(p.startswith('.') for p in parts):
                     continue
                 for store in all_stores:
-                    if file_path == store or file_path.startswith(store + '/'):  
+                    if file_path == store or file_path.startswith(store + '/'):
                         changed_stores.add(store)
                         break
-
             changed_stores_list = sorted(changed_stores)
-            visible_changed_count = sum(1 for f in changed_files if not f.startswith('.github/') and not any(p.startswith('.') for p in f.split('/')))
+            visible_changed_count = sum(
+                1 for f in changed_files
+                if not f.startswith('.github/') and not any(p.startswith('.') for p in f.split('/'))
+            )
             print(f"Changed files considered: {visible_changed_count}", file=sys.stderr)
             print(f"Filtered to indexable changed stores: {changed_stores_list}", file=sys.stderr)
             changed_dirs_json = json.dumps(changed_stores_list)
