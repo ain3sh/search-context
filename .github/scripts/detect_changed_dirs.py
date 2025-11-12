@@ -25,6 +25,11 @@ from pathlib import Path
 
 
 def get_indexable_stores(docs_path, max_depth=2):
+    """
+    Find all indexable documentation directories.
+    Only includes directories with files at their root level.
+    Skips empty namespace containers.
+    """
     indexable = []
 
     def scan_directory(path: Path, depth=0, prefix=""):
@@ -50,6 +55,7 @@ def get_indexable_stores(docs_path, max_depth=2):
 
     root = Path(docs_path)
     if not root.exists():
+        # Idempotent guard: return empty list if DOCS_PATH doesn't exist
         return []
 
     for item in root.iterdir():
@@ -60,6 +66,10 @@ def get_indexable_stores(docs_path, max_depth=2):
 
 
 def write_github_output(key, value):
+    """
+    Write output to GITHUB_OUTPUT using multiline heredoc format.
+    Format: key<<EOF_KEY\nvalue\nEOF_KEY\n
+    """
     github_output = os.environ.get('GITHUB_OUTPUT')
     if github_output:
         with open(github_output, 'a') as f:
@@ -78,6 +88,7 @@ def main():
         all_stores = get_indexable_stores(docs_path, max_depth)
         changed_dirs_json = json.dumps(all_stores)
     else:
+        # Sanity check: verify the recorded SHA exists in the docs repo
         print(f"Checking if commit {last_commit} exists in {docs_path}...", file=sys.stderr)
         try:
             subprocess.run(
@@ -97,6 +108,7 @@ def main():
             write_github_output('changed_dirs', changed_dirs_json)
             return
 
+        # Get changed files since last sync (explicit double-dot range)
         try:
             result = subprocess.run(
                 ['git', 'diff', '--name-only', f'{last_commit}..HEAD'],
@@ -118,9 +130,12 @@ def main():
             print("No changes since last sync", file=sys.stderr)
             changed_dirs_json = json.dumps([])
         else:
+            # Get all indexable stores first
             all_stores = get_indexable_stores(docs_path, max_depth)
+            # Map changed files to stores with precise prefix matching
             changed_stores = set()
             for file_path in changed_files:
+                # Skip .github paths and any hidden segment
                 parts = file_path.split('/')
                 if parts[0].startswith('.github') or any(p.startswith('.') for p in parts):
                     continue
