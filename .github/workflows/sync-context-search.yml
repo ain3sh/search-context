@@ -132,14 +132,14 @@ jobs:
 
           # Write the enhanced state file with metadata
           mkdir -p .context-sync
-          cat > .context-sync/last-docs-commit.txt <<EOF
-$DOCS_SHA
----
-Last Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-Stores Updated: ${synced_count}
-Files Uploaded: ${files_uploaded}
-Total Cost: \$${total_cost}
-EOF
+          {
+            echo "$DOCS_SHA"
+            echo ""
+            echo "Last Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "Stores Updated: ${synced_count}"
+            echo "Files Uploaded: ${files_uploaded}"
+            echo "Total Cost: \$${total_cost}"
+          } > .context-sync/last-docs-commit.txt
 
           git add .context-sync/last-docs-commit.txt
           if git diff --cached --quiet; then
