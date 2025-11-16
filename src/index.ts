@@ -54,14 +54,14 @@ interface StoreCache {
 
 const SearchContextInputSchema = z.object({
   store: z.string()
-    .min(1, "Store name is required")
-    .max(100, "Store name must not exceed 100 characters")
-    .describe("FileSearchStore name (directory path). Examples: 'context', 'Factory-AI/factory'")
+    .min(1, "Reference name is required")
+    .max(100, "Reference name must not exceed 100 characters")
+    .describe("Documentation reference name (directory path). Examples: 'context', 'Factory-AI/factory'")
     .refine(val => !val.startsWith('/') && !val.endsWith('/'), {
-      message: "Store name should not start or end with '/'"
+      message: "Reference name should not start or end with '/'"
     })
     .refine(val => !val.includes('..'), {
-      message: "Store name should not contain '..'"
+      message: "Reference name should not contain '..'"
     }),
   query: z.string()
     .min(1, "Query is required")
@@ -229,9 +229,9 @@ function handleError(error: unknown): string {
 
     if (message.includes('404') || message.includes('NOT_FOUND')) {
       return (
-        "❌ Error: FileSearchStore not found.\n\n" +
+        "❌ Error: Documentation reference not found.\n\n" +
         "**Next Steps:**\n" +
-        "1. Run `list_stores` tool to see all available stores\n" +
+        "1. Check MCP Resources (resources/list) to see all available references\n" +
         "2. Verify the GitHub Actions sync workflow ran successfully:\n" +
         "   https://github.com/ain3sh/docs/actions\n" +
         "3. Check if directory exists in repository\n" +
@@ -270,12 +270,12 @@ function handleError(error: unknown): string {
       return (
         "❌ Error: Request timed out.\n\n" +
         "**Possible Causes:**\n" +
-        "1. Large FileSearchStore (>20 GB) causing slow retrieval\n" +
+        "1. Large documentation reference (>20 GB) causing slow retrieval\n" +
         "2. Network connectivity issues\n" +
         "3. Gemini API service degradation\n\n" +
         "**Try:**\n" +
         "- Reduce top_k parameter (currently retrieving too many chunks)\n" +
-        "- Use more specific query to narrow search scope\n" +
+        "- Use more specific question to narrow search scope\n" +
         "- Retry in a few minutes\n" +
         "- Check Gemini API status: https://status.cloud.google.com/"
       );
@@ -352,10 +352,10 @@ async function searchContext(
     if (!cache.stores.has(params.store)) {
       const available = Array.from(cache.stores.keys()).sort();
       return (
-        `Error: Store '${params.store}' not found.\n\n` +
-        `Available stores:\n` +
+        `Error: Documentation reference '${params.store}' not found.\n\n` +
+        `Available references:\n` +
         available.map(s => `  - ${s}`).join('\n') +
-        `\n\nNote: Stores are automatically synced from repository directories. ` +
+        `\n\nNote: References are automatically synced from repository directories. ` +
         `If this directory exists but isn't listed, it may not have been indexed yet. ` +
         `Check GitHub Actions sync status.`
       );
@@ -382,11 +382,11 @@ async function searchContext(
     // Extract grounding metadata
     if (!response.candidates || !response.candidates[0]?.groundingMetadata) {
       return (
-        `No results found in store '${params.store}' for query: ${params.query}\n\n` +
+        `No results found in reference '${params.store}' for query: ${params.query}\n\n` +
         `Try:\n` +
-        `  - Using different keywords\n` +
+        `  - Rephrasing your question\n` +
         `  - Being more specific or more general\n` +
-        `  - Searching a different store`
+        `  - Searching a different documentation reference`
       );
     }
 
@@ -426,20 +426,20 @@ async function main() {
     version: "1.0.0"
   });
 
-  // Register resources for each store dynamically
-  // Fetch stores and register each one as a resource
+  // Register resources for each reference dynamically
+  // Fetch references and register each one as a resource
   try {
     const cache = await getStores(client);
-    log('info', 'Registering store resources', { count: cache.storeList.length });
+    log('info', 'Registering documentation reference resources', { count: cache.storeList.length });
 
     for (const store of cache.storeList) {
-      const uri = `store://${store.displayName}`;
+      const uri = `reference://${store.displayName}`;
       server.registerResource(
         store.displayName,
         uri,
         {
-          title: `${store.displayName} Documentation Store`,
-          description: `FileSearchStore for '${store.displayName}' documentation. Use with search_context tool.`,
+          title: `${store.displayName} Documentation Reference`,
+          description: `Documentation reference for '${store.displayName}'. Use with ask_docs_agent tool to ask questions.`,
           mimeType: "application/json"
         },
         async (resourceUri) => {
@@ -449,7 +449,7 @@ async function main() {
             name: store.name,
             createTime: store.createTime,
             updateTime: store.updateTime,
-            usage: `Use this store with search_context tool: { store: "${store.displayName}", query: "your query" }`
+            usage: `Ask questions about this reference with ask_docs_agent tool: { store: "${store.displayName}", query: "your question" }`
           }, null, 2);
 
           return {
@@ -462,56 +462,43 @@ async function main() {
         }
       );
     }
-    log('info', 'Store resources registered successfully');
+    log('info', 'Documentation reference resources registered successfully');
   } catch (error) {
-    log('error', 'Failed to register store resources', { error });
+    log('error', 'Failed to register documentation reference resources', { error });
     // Continue anyway - tools can still work even if resources aren't registered
   }
 
-  // Register search_context tool
+  // Register ask_docs_agent tool
   server.registerTool(
-    "search_context",
+    "ask_docs_agent",
     {
-      title: "Search Context Documentation",
-      description: `Search documentation using semantic search powered by Gemini File Search API.
+      title: "Ask Documentation Agent",
+      description: `AI-powered semantic search for complex documentation questions. Best for conceptual queries, multi-part research, and understanding how systems work.
 
-**Simple Usage**: Just provide store name and query. Sane defaults handle everything else.
+**How to Use:**
+1. Find available references: Check MCP Resources list - each resource is a searchable documentation reference
+2. Ask your question: Use natural language, be specific about what you want to understand
+3. Default response includes synthesized answer + source citations (token-efficient)
 
-Queries FileSearchStores automatically synced from ain3sh/docs repository. Each top-level directory maps to its own FileSearchStore.
+**Required:**
+  • store: Reference name from MCP Resources (e.g., "context", "Factory-AI/factory")
+  • query: Your question in natural language
 
-**Required Parameters:**
-  - store (string): FileSearchStore name (e.g., 'context', 'Factory-AI/factory')
-    Discover available stores via MCP Resources (resources/list)
-  - query (string): Natural language search query
+**Optional (use when needed):**
+  • include_chunks: true - Show document excerpts for verification (increases tokens ~3x)
+  • top_k: 1-20 - Number of excerpts when include_chunks=true (default: 3)
+  • response_format: "json" - Structured output instead of markdown
+  • metadata_filter: Advanced filtering using List Filter syntax
 
-**Optional Parameters (rarely needed):**
-  - include_chunks (boolean, default: false): Include document chunk previews for verification
-    When false: Returns only synthesized answer + source citations (token-efficient)
-    When true: Includes truncated chunk previews (500 chars each) for evidence
-  - top_k (number, default: 3): Number of chunks to retrieve (only relevant if include_chunks=true)
-  - response_format ('markdown' | 'json', default: 'markdown'): Output format
-  - metadata_filter (string): Advanced filtering (syntax: google.aip.dev/160)
+**Effective Queries:**
+  ✅ "How does authentication work and why is it designed this way?"
+  ✅ "What are the key differences between async and sync processing?"
+  ✅ "Explain the rate limiting strategy and its tradeoffs"
+  ❌ "authentication" (too vague)
+  ❌ Single keywords without context
 
-**Default Response** (include_chunks=false):
-  - Synthesized answer from semantic search
-  - Source file citations
-  - ~500-1000 tokens total
-
-**With Chunks** (include_chunks=true):
-  - Synthesized answer
-  - Source file citations
-  - Document chunk previews (truncated to 500 chars each)
-  - ~2000-3000 tokens total
-
-**Examples:**
-  - Simple: {store: "context", query: "How does File Search chunking work?"}
-  - With evidence: {store: "context", query: "authentication flow", include_chunks: true}
-  - Advanced filtering: {store: "context", query: "books", metadata_filter: 'author="Robert Graves"'}
-
-**Error Handling:**
-  - Invalid store → Lists available stores
-  - No results → Suggests alternative queries
-  - Responses truncated at 25,000 chars if needed`,
+**Finding References:**
+All available documentation references are registered as MCP Resources. Use the Resources list to see what's searchable. Each top-level directory from ain3sh/docs is its own reference.`,
       inputSchema: SearchContextInputSchema.shape,
       annotations: {
         readOnlyHint: true,

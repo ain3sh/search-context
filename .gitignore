@@ -40,3 +40,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# Development and testing (not for remote)
+AGENT_REMINDERS.md
+.github/scripts/test_exclusions.py

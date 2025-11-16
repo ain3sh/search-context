@@ -54,7 +54,8 @@ jobs:
           set -euo pipefail
           STATE_FILE="search-context/.context-sync/last-docs-commit.txt"
           if [ -f "$STATE_FILE" ]; then
-            LAST_SYNC_DOCS_COMMIT=$(cat "$STATE_FILE")
+            # Read only first line (SHA) for backwards compatibility with enhanced format
+            LAST_SYNC_DOCS_COMMIT=$(head -n 1 "$STATE_FILE")
             echo "Found previous sync marker: $LAST_SYNC_DOCS_COMMIT"
             echo "last_docs_commit=$LAST_SYNC_DOCS_COMMIT" >> "$GITHUB_OUTPUT"
           else
@@ -119,9 +120,26 @@ jobs:
           git checkout -B main origin/main
           git -c rebase.autoStash=true pull --rebase origin main
 
-          # Now write the state file and commit if it changed
+          # Read sync summary if available
+          if [ -f /tmp/sync_summary.txt ]; then
+            # shellcheck disable=SC1091
+            source /tmp/sync_summary.txt
+          else
+            synced_count=0
+            files_uploaded=0
+            total_cost=0.0000
+          fi
+
+          # Write the enhanced state file with metadata
           mkdir -p .context-sync
-          echo "$DOCS_SHA" > .context-sync/last-docs-commit.txt
+          {
+            echo "$DOCS_SHA"
+            echo ""
+            echo "Last Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "Stores Updated: ${synced_count}"
+            echo "Files Uploaded: ${files_uploaded}"
+            echo "Total Cost: \$${total_cost}"
+          } > .context-sync/last-docs-commit.txt
 
           git add .context-sync/last-docs-commit.txt
           if git diff --cached --quiet; then
