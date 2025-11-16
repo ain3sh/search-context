@@ -1,0 +1,41 @@
+# Exclusion List for Context Search Indexing
+# ==========================================
+#
+# This file specifies directories that should NOT be indexed for semantic search.
+# Useful for excluding mirrored folders, archives, or build artifacts that exist
+# in ain3sh/docs but shouldn't create embeddings.
+#
+# Format:
+#   - One pattern per line
+#   - Lines starting with # are comments
+#   - Empty lines are ignored
+#   - Patterns are relative to the docs repository root
+#
+# Pattern Types:
+#   1. Exact match: "archived" blocks any directory exactly named "archived"
+#   2. Prefix match: "temp/*" blocks all subdirectories under temp/
+#   3. Path match: "old/archived" blocks "old/archived" specifically
+#
+# Examples:
+#   node_modules          # Block all node_modules directories
+#   archived/*            # Block everything under archived/
+#   .cache                # Block hidden cache directories
+#   _drafts               # Block draft content (common Jekyll/Hugo convention)
+#   build                 # Block build output directories
+#   dist                  # Block distribution directories
+#
+# ==========================================
+
+# Add your exclusion patterns below (one per line):
+
+# Example: Uncomment to exclude archived content
+# archived/*
+
+# Example: Uncomment to exclude temporary directories
+# temp
+# tmp
+
+# Example: Uncomment to exclude build artifacts
+# build
+# dist
+# out

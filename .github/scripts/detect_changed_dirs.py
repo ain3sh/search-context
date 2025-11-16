@@ -22,6 +22,69 @@ import sys
 import json
 import subprocess
 from pathlib import Path
+from typing import List, Set
+
+
+def load_exclusion_patterns() -> Set[str]:
+    """
+    Load exclusion patterns from .context-sync/exclusion-list.txt.
+    Returns a set of patterns to exclude from indexing.
+    Handles missing file gracefully by returning empty set.
+    """
+    exclusion_file = Path("search-context/.context-sync/exclusion-list.txt")
+    patterns = set()
+
+    if not exclusion_file.exists():
+        print("  ℹ️  No exclusion list found (this is fine)", file=sys.stderr)
+        return patterns
+
+    try:
+        with open(exclusion_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if line and not line.startswith('#'):
+                    patterns.add(line)
+
+        if patterns:
+            print(f"  📋 Loaded {len(patterns)} exclusion patterns", file=sys.stderr)
+            for pattern in sorted(patterns):
+                print(f"     - {pattern}", file=sys.stderr)
+        else:
+            print("  ℹ️  Exclusion list is empty (all directories will be indexed)", file=sys.stderr)
+    except Exception as e:
+        print(f"  ⚠️  Warning: Could not read exclusion list: {e}", file=sys.stderr)
+
+    return patterns
+
+
+def is_excluded(store_name: str, exclusion_patterns: Set[str]) -> bool:
+    """
+    Check if a store name matches any exclusion pattern.
+
+    Supports two pattern types:
+    1. Exact match: "archived" matches store "archived"
+    2. Prefix match: "temp/*" matches any store starting with "temp/"
+
+    Args:
+        store_name: The store/directory name to check (e.g., "context" or "Factory-AI/factory")
+        exclusion_patterns: Set of exclusion patterns
+
+    Returns:
+        True if store should be excluded, False otherwise
+    """
+    for pattern in exclusion_patterns:
+        # Exact match
+        if store_name == pattern:
+            return True
+
+        # Prefix match with wildcard (e.g., "archived/*")
+        if pattern.endswith('/*'):
+            prefix = pattern[:-2]  # Remove the /*
+            if store_name.startswith(prefix + '/') or store_name == prefix:
+                return True
+
+    return False
 
 
 def get_indexable_stores(docs_path, max_depth=2):
@@ -29,8 +92,10 @@ def get_indexable_stores(docs_path, max_depth=2):
     Find all indexable documentation directories.
     Only includes directories with files at their root level.
     Skips empty namespace containers.
+    Applies exclusion patterns from .context-sync/exclusion-list.txt.
     """
     indexable = []
+    exclusion_patterns = load_exclusion_patterns()
 
     def scan_directory(path: Path, depth=0, prefix=""):
         if depth > max_depth:
@@ -44,8 +109,13 @@ def get_indexable_stores(docs_path, max_depth=2):
 
         if files_at_root > 0:
             store_name = f"{prefix}{path.name}" if prefix else path.name
-            indexable.append(store_name)
-            print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)", file=sys.stderr)
+
+            # Check exclusion patterns
+            if is_excluded(store_name, exclusion_patterns):
+                print(f"  🚫 Excluded: {store_name} (matches exclusion pattern)", file=sys.stderr)
+            else:
+                indexable.append(store_name)
+                print(f"  ✅ Indexable: {store_name} ({files_at_root} files at root)", file=sys.stderr)
         else:
             print(f"  ⏭️  Skipping: {prefix}{path.name} (0 files at root, checking subdirs)", file=sys.stderr)
             subdirs = [d for d in entries if d.is_dir()]
