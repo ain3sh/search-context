@@ -1,32 +1,33 @@
 # Search Context MCP Server
 
-TypeScript MCP server providing semantic search over documentation repositories using Google's Gemini File Search API.
+TypeScript MCP server that provides semantic search over documentation repositories using Gemini File Search.
 
-Built for the [ain3sh/docs](https://github.com/ain3sh/docs) repository but easily adaptable to any documentation source.
+Originally built for [`ain3sh/docs`](https://github.com/ain3sh/docs), but easily adapted to any docs repo.
 
-## What It Does
+## Features
 
-Enables AI agents to search documentation using natural language queries that understand meaning and context, not just keywords. Each top-level directory becomes its own searchable store, automatically indexed and kept up-to-date via GitHub Actions.
+- 🔍 Semantic search over docs using Gemini File Search
+- 📁 One store per top-level directory (e.g. `store://context`)
+- 🤝 MCP Resources for automatic store discovery
+- 🧠 Natural language queries with source citations
+- ⚡ Token-efficient responses (~500–1000 tokens by default)
+- 🔄 Auto-synced indexes via GitHub Actions (daily at 2 AM UTC)
+- 💰 Ultra-low cost (typically ~$0.25–$1/month)
+- 📊 Dual formats: Markdown (human) and JSON (programmatic)
 
-**Key Capabilities:**
-- Semantic search powered by Gemini's File Search API
-- Natural language queries with source citations
-- Auto-synced indexes (daily at 2 AM UTC)
-- MCP Resources for automatic store discovery
-- Token-efficient responses (500-1000 tokens by default)
-- Ultra-low cost (~$0.25-$1/month for typical usage)
+---
 
-## Installation
+## Quick Start
 
-### Recommended: npx
+### Recommended: `npx`
 
 ```bash
 npx -y github:ain3sh/search-context
-```
+````
 
-No installation or cloning required. Always uses the latest version from GitHub.
+No cloning required. Always uses the latest version from GitHub.
 
-### Alternative: From Source
+### From Source
 
 ```bash
 git clone https://github.com/ain3sh/search-context.git
@@ -36,7 +37,16 @@ npm run build
 npm start
 ```
 
+---
+
 ## Configuration
+
+### Environment Variables
+
+* `GEMINI_API_KEY` **(required)**: Your Gemini API key
+* `LOG_LEVEL` *(optional)*: `debug`, `info`, or `error` (default: `info`)
+
+Get an API key: [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 
 ### Claude Desktop
 
@@ -55,8 +65,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
-
-Get your API key: https://aistudio.google.com/apikey
 
 ### Claude Code (Project-Level)
 
@@ -77,39 +85,39 @@ Create `.mcp.json` in your project root:
 }
 ```
 
-Set the environment variable:
+Then set:
 
 ```bash
 export GEMINI_API_KEY=your_api_key_here
 ```
 
-### Environment Variables
-
-- `GEMINI_API_KEY` (required): Your Gemini API key
-- `LOG_LEVEL` (optional): Logging verbosity - `debug`, `info`, or `error` (default: `info`)
+---
 
 ## Usage
 
 ### Discovering Stores
 
-Stores are automatically exposed via MCP Resources. Clients can discover available documentation stores using `resources/list`:
+Stores are exposed as MCP Resources. Clients can discover them via `resources/list`.
 
-```typescript
-// MCP Resources automatically lists available stores
-// Each store appears as: store://context, store://Factory-AI/factory, etc.
+Each top-level directory in the target repo appears as a store URI:
+
+```text
+store://context
+store://Factory-AI/factory
+store://other-docs
 ```
 
 ### Searching Documentation
 
-The `search_context` tool accepts natural language queries:
+Use the `search_context` tool with natural language queries:
 
-```typescript
-// Minimal query (most common)
+```ts
+// Minimal query (common case)
 search_context({
   store: "context",
   query: "How does File Search chunking work?"
 })
-// Returns: ~500-1000 tokens with answer + citations
+// → ~500–1000 tokens, answer + citations
 
 // With evidence chunks (for verification)
 search_context({
@@ -117,20 +125,24 @@ search_context({
   query: "authentication flow setup",
   include_chunks: true
 })
-// Returns: ~2000-3000 tokens with answer + citations + chunk previews
+// → ~2000–3000 tokens, answer + citations + chunk previews
 ```
 
-**Parameters:**
-- `store` (string, required): Store name from resources (e.g., "context", "Factory-AI/factory")
-- `query` (string, required): Natural language search query
-- `include_chunks` (boolean, optional): Include document chunk previews (default: `false`)
-- `top_k` (number, optional): Number of chunks to retrieve when `include_chunks=true` (default: `3`, max: `20`)
-- `response_format` (string, optional): `"markdown"` or `"json"` (default: `"markdown"`)
-- `metadata_filter` (string, optional): Advanced filtering using [List Filter syntax](https://google.aip.dev/160)
+#### Parameters
 
-**Response Format:**
+* `store` **(string, required)**: Store name from MCP Resources
+  e.g. `"context"`, `"Factory-AI/factory"`
+* `query` **(string, required)**: Natural language query
+* `include_chunks` *(boolean, optional)*: Include chunk previews (default: `false`)
+* `top_k` *(number, optional)*: Chunks to retrieve when `include_chunks=true`
+  Default: `3`, max: `20`
+* `response_format` *(string, optional)*: `"markdown"` or `"json"` (default: `"markdown"`)
+* `metadata_filter` *(string, optional)*: Advanced filter using [List Filter syntax](https://google.aip.dev/160)
 
-Default (Markdown, `include_chunks=false`):
+#### Response Format
+
+**Default (`response_format="markdown"`, `include_chunks=false`):**
+
 ```markdown
 # Search Results: context
 
@@ -146,7 +158,8 @@ Default (Markdown, `include_chunks=false`):
   - CONTEXT_SEARCH_MCP_SPEC.md
 ```
 
-With chunks (Markdown, `include_chunks=true`):
+**With chunks (`include_chunks=true`):**
+
 ```markdown
 [... same as above, plus ...]
 
@@ -162,13 +175,15 @@ Files are automatically chunked when imported into a file search store...
 ---
 ```
 
-JSON format includes structured `query`, `response`, `sources`, and optionally `chunks` arrays.
+JSON responses include structured `query`, `response`, `sources`, and optional `chunks[]`.
+
+---
 
 ## Architecture
 
 ### Data Flow
 
-```
+```text
 Agent Query
     ↓
 MCP search_context(store, query)
@@ -187,78 +202,96 @@ Return answer + citations (± chunks)
 ### Indexing Flow
 
 GitHub Actions workflow (`sync-stores.yml`) runs:
-- **Schedule**: Daily at 2 AM UTC
-- **Trigger**: Manual or on push to main
-- **Process**:
-  1. Detects changed directories via git tag (`last-context-sync`)
-  2. Rebuilds only modified FileSearchStores
-  3. Logs indexing cost per sync
-  4. Updates stores in Gemini File Search API
+
+* **Schedule**: Daily at 2 AM UTC
+* **Triggers**: Manual or on push to `main`
+* **Process**:
+
+  1. Detect changed directories via git tag (`last-context-sync`)
+  2. Rebuild only modified FileSearchStores
+  3. Log indexing cost per sync
+  4. Update stores in Gemini File Search
 
 ### Store Organization
 
-Each top-level directory in the target repository becomes an isolated FileSearchStore:
+Each top-level directory in the docs repo becomes an isolated `FileSearchStore`:
 
-```
+```text
 ain3sh/docs/
 ├── context/               → store://context
 ├── Factory-AI/factory/    → store://Factory-AI/factory
 └── other-docs/            → store://other-docs
 ```
 
-### Cost Model
+---
 
-- **Indexing**: $0.15 per 1M tokens (one-time per file, repeated only when changed)
-- **Storage**: Free
-- **Queries**: Free (retrieved chunks charged as standard context tokens)
+## Performance & Cost
 
-**Monthly Estimate:**
-- 100 files (~150k tokens): $0.0225 per sync
-- Daily syncs with 1-2 directories changing: **$0.25-$1/month**
-- Active development (frequent changes): **$3-$6/month**
+### Token Efficiency
 
-## Token Efficiency
+Responses are optimized to avoid context spam:
 
-Responses are optimized for minimal token usage:
+| Mode                                | Tokens (approx.) | Contents                                   |
+| ----------------------------------- | ---------------- | ------------------------------------------ |
+| Default (`include_chunks=false`)    | ~500–1000        | Synthesized answer + source citations      |
+| With chunks (`include_chunks=true`) | ~2000–3000       | Answer + sources + 500-char chunk previews |
 
-| Mode | Tokens | Contents |
-|------|--------|----------|
-| Default (`include_chunks=false`) | ~500-1000 | Synthesized answer + source citations |
-| With chunks (`include_chunks=true`) | ~2000-3000 | Answer + sources + chunk previews (500 chars each) |
+Safeguards:
 
-**Previous implementation**: ~10,000+ tokens per query
-**Current implementation**: ~500-1000 tokens by default (**90% reduction**)
+* Chunk previews truncated to 500 characters
+* Full responses capped at 25,000 characters
+* Store metadata cached for 5 minutes
 
-Automatic safeguards:
-- Chunk previews truncated to 500 characters
-- Full responses capped at 25,000 characters
-- Store metadata cached for 5 minutes
+**Compared to a naive implementation:**
+
+* Previous: ~10,000+ tokens per query
+* Current: ~500–1000 tokens by default (~90% reduction)
+
+### Cost Model (Gemini File Search)
+
+* **Indexing**: ~$0.15 per 1M tokens (one-time per file; re-run only when file changes)
+* **Storage**: Free
+* **Queries**: Free; retrieved chunks are charged as normal context tokens
+
+**Example monthly estimate:**
+
+* 100 files (~150k tokens): ~$0.0225 per sync
+* Daily syncs, small changes: **~$0.25–$1/month**
+* Heavy churn / active development: **~$3–$6/month**
+
+---
 
 ## Adapting to Your Repository
 
-This server is built for [ain3sh/docs](https://github.com/ain3sh/docs) but can be adapted to any documentation repository.
+The server is built for [`ain3sh/docs`](https://github.com/ain3sh/docs) but works for any docs repo with minimal changes.
 
 ### Requirements
 
-1. **Repository structure**: Top-level directories become stores
-2. **GitHub Actions**: Add workflow file (see `.github/workflows/sync-stores.yml`)
-3. **Gemini API key**: Set as repository secret `GEMINI_API_KEY`
-4. **File formats**: Markdown, text, PDF, or any Gemini-supported format
+1. **Repository structure**: Top-level directories map to stores
+2. **GitHub Actions**: Add a workflow file (e.g. `.github/workflows/sync-stores.yml`)
+3. **Gemini API key**: Set repo secret `GEMINI_API_KEY`
+4. **File formats**: Use Markdown, text, PDF, or any Gemini-supported format
 
 ### Customization Points
 
-**Change target repository:**
-- Update GitHub Actions workflow to point to your repository
-- Modify sync script to match your directory structure
+* **Target repository**
 
-**Adjust sync frequency:**
-- Edit workflow cron schedule (currently `0 2 * * *`)
+  * Update the workflow checkout / paths to point at your repo
+  * Adjust the sync script for your directory layout
 
-**Filter directories:**
-- Modify sync script to include/exclude specific paths
+* **Sync frequency**
 
-**Custom chunking:**
-- Configure `chunking_config` in `src/index.ts` (see Gemini docs)
+  * Edit the cron schedule (default: `0 2 * * *` for 2 AM UTC)
+
+* **Directory filtering**
+
+  * Modify the sync script to include/exclude paths
+
+* **Chunking behavior**
+
+  * Tune `chunking_config` in `src/index.ts` (see Gemini docs)
+
+---
 
 ## Development
 
@@ -280,120 +313,119 @@ GEMINI_API_KEY=your_key npm start
 
 ### Project Structure
 
-```
+```text
 search-context/
 ├── src/
-│   └── index.ts           # Main implementation
+│   └── index.ts            # Main implementation
 ├── dist/
-│   └── index.js           # Compiled output (committed for npx)
+│   └── index.js            # Compiled output (committed for npx)
 ├── .github/
 │   └── workflows/
 │       └── sync-stores.yml # Auto-sync workflow
-├── package.json           # Includes bin field for CLI
+├── package.json            # Includes bin field for CLI
 ├── tsconfig.json
 └── README.md
 ```
 
-### Testing
+### Quick Local Test
 
 ```bash
-# Build first
 npm run build
-
-# Test locally with timeout (server runs indefinitely)
 timeout 5s GEMINI_API_KEY=your_key npx .
 ```
 
-**Note**: MCP servers are long-running processes. Testing is best done via MCP client integration (Claude Desktop, Claude Code, etc.).
+MCP servers are long-lived; real testing is best via an MCP client (Claude Desktop, Claude Code, etc.).
+
+---
 
 ## Troubleshooting
 
 ### Store Not Found
 
-**Error**: `"Error: Store 'xyz' not found"`
+**Error**: `Error: Store 'xyz' not found`
 
-**Solutions**:
-- Verify directory exists in repository
-- Check GitHub Actions workflow completed successfully
-- Inspect workflow logs in repository Actions tab
-- Resources may take a few minutes to sync after workflow runs
+Check:
 
-### API Key Issues
+* Directory exists in the docs repo
+* GitHub Actions sync workflow completed successfully
+* Workflow logs (repository → **Actions**)
+* Resources have had a few minutes to sync after a run
+
+### API Key Problems
 
 **Symptoms**: `UNAUTHENTICATED`, `Invalid API key`
 
-**Solutions**:
-- Confirm `GEMINI_API_KEY` environment variable is set
-- Test key at https://aistudio.google.com/apikey
-- Verify key has File Search API access enabled
-- Check API quota hasn't been exceeded (free tier: 1500 RPD)
+Check:
 
-### No Results Found
+* `GEMINI_API_KEY` is set in the environment / repo secrets
+* Key works at [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+* File Search API access is enabled
+* Quota not exceeded (free tier ~1500 RPD)
 
-**Symptoms**: Query returns "No results found"
+### No Results
 
-**Solutions**:
-- Try broader or more specific queries
-- Verify files exist in target store directory
-- Check GitHub Actions sync completed for that directory
-- Use different terminology or rephrase question
-- Ensure files are in supported formats (text, markdown, PDF)
+**Symptoms**: `"No results found"`
 
-### Rate Limit Exceeded
+Try:
+
+* Broader or more precise query wording
+* Confirm files exist in the target directory
+* Confirm the latest sync completed
+* Use terms closer to the docs’ own wording
+* Ensure files use supported formats (Markdown, text, PDF, etc.)
+
+### Rate Limits
 
 **Error**: `429`, `RESOURCE_EXHAUSTED`
 
-**Solutions**:
-- Free tier: 15 RPM (requests per minute)
-- Wait 60 seconds before retrying
-- Reduce query frequency
-- Upgrade to paid tier: https://console.cloud.google.com/
+* Free tier: ~15 RPM
+* Wait 60 seconds before retrying
+* Reduce query rate
+* If needed, upgrade to a paid tier in the cloud console
 
-### Server Not Loading
+### Server Not Loading in Client
 
-**Symptoms**: MCP client doesn't recognize server
+**Symptoms**: MCP client doesn’t show `search-context`
 
-**Solutions**:
-- Verify `npm run build` completes without errors
-- Check MCP configuration syntax (JSON valid)
-- Review client logs (e.g., `~/Library/Logs/Claude/mcp*.log`)
-- Ensure npx can access GitHub
-- Test server manually: `GEMINI_API_KEY=key npx -y github:ain3sh/search-context`
+Check:
+
+* `npm run build` completes without errors
+* MCP config JSON is valid
+* Client logs (e.g. `~/Library/Logs/Claude/mcp*.log`)
+* `npx` can access GitHub
+* Manual run works:
+
+  ```bash
+  GEMINI_API_KEY=key npx -y github:ain3sh/search-context
+  ```
+
+---
 
 ## GitHub Actions Setup
 
-The repository using this server needs a workflow to keep stores synced.
+To keep stores in sync, the **docs repository** (not this server repo) needs a workflow.
 
 ### Repository Secret
 
-1. Go to **Settings** → **Secrets and variables** → **Actions**
+1. Go to **Settings → Secrets and variables → Actions**
 2. Click **New repository secret**
 3. Name: `GEMINI_API_KEY`
-4. Value: Your Gemini API key from https://aistudio.google.com/apikey
+4. Value: your Gemini API key
 5. Click **Add secret**
 
 ### Workflow File
 
-See `.github/workflows/sync-stores.yml` in this repository for a complete example.
+Copy or adapt `.github/workflows/sync-stores.yml` from this repo into your docs repo.
 
-**Manual Trigger:**
-1. Go to **Actions** tab in your repository
-2. Select **Sync Context Search Stores** workflow
+To trigger manually:
+
+1. Open the **Actions** tab
+2. Select the **Sync Context Search Stores** workflow
 3. Click **Run workflow**
-4. Monitor logs for sync progress and cost reporting
+4. Watch the logs for sync status and cost reporting
 
-## Features
-
-- **🔍 Semantic Search**: Understands meaning and context, not just keywords
-- **📁 Isolated Stores**: Each directory is independently searchable
-- **🔄 Auto-Sync**: GitHub Actions keeps indexes fresh
-- **💰 Ultra-Low Cost**: $0.25-$1/month typical usage
-- **🎯 Source Citations**: Every answer includes file references
-- **⚡ Token Efficient**: 90% reduction vs naive implementations
-- **📊 Dual Formats**: Markdown (human) and JSON (programmatic)
-- **🔒 Smart Caching**: 5-minute store cache reduces API calls
-- **📦 MCP Resources**: Standard protocol for store discovery
+---
 
 ## License
 
-MIT License - See LICENSE file
+MIT License – see `LICENSE`.
