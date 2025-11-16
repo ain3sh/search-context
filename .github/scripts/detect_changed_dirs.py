@@ -27,11 +27,11 @@ from typing import List, Set
 
 def load_exclusion_patterns() -> Set[str]:
     """
-    Load exclusion patterns from .context-sync/exclusion-list.txt.
+    Load exclusion patterns from exclusion-list.txt in repo root.
     Returns a set of patterns to exclude from indexing.
     Handles missing file gracefully by returning empty set.
     """
-    exclusion_file = Path("search-context/.context-sync/exclusion-list.txt")
+    exclusion_file = Path("search-context/exclusion-list.txt")
     patterns = set()
 
     if not exclusion_file.exists():
