@@ -1,19 +1,37 @@
 # Search Context MCP Server
 
-TypeScript MCP server that provides semantic search over documentation repositories using Gemini File Search.
+A generic MCP server that provides semantic search over documentation using Gemini File Search.
 
-Originally built for [`ain3sh/docs`](https://github.com/ain3sh/docs), but easily adapted to any docs repo.
+**What it does**: Queries Gemini FileSearchStores in the cloud and returns AI-generated answers with source citations.
+
+**What it doesn't do**: Index files, manage git repos, or run workflows. Indexing happens separately (e.g., via GitHub Actions in your docs repo, or any custom pipeline).
 
 ## Features
 
-- 🔍 Semantic search over docs using Gemini File Search
-- 📁 One store per top-level directory (e.g. `store://context`)
-- 🤝 MCP Resources for automatic store discovery
+- 🔍 Semantic search using Gemini File Search API
+- 🤝 Dynamic store discovery via Gemini API (no local configuration needed)
 - 🧠 Natural language queries with source citations
 - ⚡ Token-efficient responses (~500–1000 tokens by default)
-- 🔄 Auto-synced indexes via GitHub Actions (daily at 2 AM UTC)
-- 💰 Ultra-low cost (typically ~$0.25–$1/month)
-- 📊 Dual formats: Markdown (human) and JSON (programmatic)
+- 📊 Dual formats: Markdown (human-readable) and JSON (programmatic)
+- 🌐 Generic: Works with any Gemini FileSearchStores you've created
+
+---
+
+## Architecture
+
+```
+Your indexing pipeline → Gemini FileSearchStores (cloud)
+                              ↓
+                         search-context MCP server (local)
+                              ↓
+                            Claude
+```
+
+**Key points**:
+- MCP server **only queries** cloud-based FileSearchStores
+- Does **not** interact with git repos or local files
+- Stores are created and updated by **your** indexing workflow
+- Server discovers stores dynamically via `client.file_search_stores.list()`
 
 ---
 
@@ -23,7 +41,7 @@ Originally built for [`ain3sh/docs`](https://github.com/ain3sh/docs), but easily
 
 ```bash
 npx -y github:ain3sh/search-context
-````
+```
 
 No cloning required. Always uses the latest version from GitHub.
 
@@ -99,13 +117,15 @@ export GEMINI_API_KEY=your_api_key_here
 
 Stores are exposed as MCP Resources. Clients can discover them via `resources/list`.
 
-Each top-level directory in the target repo appears as a store URI:
+The server queries Gemini's API on startup to find all available FileSearchStores and exposes them as URIs:
 
 ```text
 store://context
 store://Factory-AI/factory
 store://other-docs
 ```
+
+**Note**: Store names come from the `displayName` field you set when creating the FileSearchStore.
 
 ### Searching Documentation
 
@@ -179,52 +199,6 @@ JSON responses include structured `query`, `response`, `sources`, and optional `
 
 ---
 
-## Architecture
-
-### Data Flow
-
-```text
-Agent Query
-    ↓
-MCP search_context(store, query)
-    ↓
-Validate store (cached lookup)
-    ↓
-Gemini File Search API
-    ↓
-Semantic retrieval + synthesis
-    ↓
-Format response (markdown/JSON)
-    ↓
-Return answer + citations (± chunks)
-```
-
-### Indexing Flow
-
-GitHub Actions workflow (`sync-stores.yml`) runs:
-
-* **Schedule**: Daily at 2 AM UTC
-* **Triggers**: Manual or on push to `main`
-* **Process**:
-
-  1. Detect changed directories via git tag (`last-context-sync`)
-  2. Rebuild only modified FileSearchStores
-  3. Log indexing cost per sync
-  4. Update stores in Gemini File Search
-
-### Store Organization
-
-Each top-level directory in the docs repo becomes an isolated `FileSearchStore`:
-
-```text
-ain3sh/docs/
-├── context/               → store://context
-├── Factory-AI/factory/    → store://Factory-AI/factory
-└── other-docs/            → store://other-docs
-```
-
----
-
 ## Performance & Cost
 
 ### Token Efficiency
@@ -242,54 +216,76 @@ Safeguards:
 * Full responses capped at 25,000 characters
 * Store metadata cached for 5 minutes
 
-**Compared to a naive implementation:**
-
-* Previous: ~10,000+ tokens per query
-* Current: ~500–1000 tokens by default (~90% reduction)
-
 ### Cost Model (Gemini File Search)
 
+**For the MCP server** (querying):
+* **Queries**: Free; retrieved chunks are charged as normal context tokens to your Gemini API usage
+
+**For indexing** (done separately by your pipeline):
 * **Indexing**: ~$0.15 per 1M tokens (one-time per file; re-run only when file changes)
 * **Storage**: Free
-* **Queries**: Free; retrieved chunks are charged as normal context tokens
 
-**Example monthly estimate:**
-
+**Example monthly estimate** (if using a daily indexing workflow):
 * 100 files (~150k tokens): ~$0.0225 per sync
 * Daily syncs, small changes: **~$0.25–$1/month**
 * Heavy churn / active development: **~$3–$6/month**
 
 ---
 
-## Adapting to Your Repository
+## Setting Up Indexing (Separate from MCP Server)
 
-The server is built for [`ain3sh/docs`](https://github.com/ain3sh/docs) but works for any docs repo with minimal changes.
+The MCP server **only queries** existing Gemini FileSearchStores. You need a separate process to create and update these stores.
 
-### Requirements
+### Option 1: GitHub Actions Workflow
 
-1. **Repository structure**: Top-level directories map to stores
-2. **GitHub Actions**: Add a workflow file (e.g. `.github/workflows/sync-stores.yml`)
-3. **Gemini API key**: Set repo secret `GEMINI_API_KEY`
-4. **File formats**: Use Markdown, text, PDF, or any Gemini-supported format
+If you have a docs repository, you can automate indexing with GitHub Actions.
 
-### Customization Points
+**Example**: See [`ain3sh/docs`](https://github.com/ain3sh/docs) for a complete implementation:
+- `mirrors.json`: Configuration for which repos/directories to index
+- `.github/scripts/sync.py`: Script that creates/updates FileSearchStores
+- `.github/workflows/sync.yml`: Workflow that runs daily and on changes
 
-* **Target repository**
+**Key steps**:
+1. Set `GEMINI_API_KEY` as a repository secret
+2. Create a workflow that:
+   - Clones/fetches documentation files
+   - Uses Gemini File Search API to create/update stores
+   - Sets a `displayName` for each store (this becomes the store name in MCP)
+3. Run daily or on file changes
 
-  * Update the workflow checkout / paths to point at your repo
-  * Adjust the sync script for your directory layout
+### Option 2: Custom Pipeline
 
-* **Sync frequency**
+You can index from any environment:
 
-  * Edit the cron schedule (default: `0 2 * * *` for 2 AM UTC)
+```python
+from google import genai
 
-* **Directory filtering**
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-  * Modify the sync script to include/exclude paths
+# Create a store
+store = client.file_search_stores.create(
+    display_name="my-docs"  # This becomes store://my-docs in MCP
+)
 
-* **Chunking behavior**
+# Upload files
+for file_path in doc_files:
+    client.file_search_stores.upload_file(
+        store_id=store.id,
+        path=file_path
+    )
+```
 
-  * Tune `chunking_config` in `src/index.ts` (see Gemini docs)
+### Store Naming
+
+The `displayName` you set when creating a FileSearchStore becomes its MCP resource URI:
+
+```python
+# In your indexing script:
+store = client.file_search_stores.create(display_name="context")
+
+# In MCP:
+search_context({ store: "context", query: "..." })
+```
 
 ---
 
@@ -316,12 +312,9 @@ GEMINI_API_KEY=your_key npm start
 ```text
 search-context/
 ├── src/
-│   └── index.ts            # Main implementation
+│   └── index.ts            # Main MCP server implementation
 ├── dist/
 │   └── index.js            # Compiled output (committed for npx)
-├── .github/
-│   └── workflows/
-│       └── sync-stores.yml # Auto-sync workflow
 ├── package.json            # Includes bin field for CLI
 ├── tsconfig.json
 └── README.md
@@ -344,85 +337,56 @@ MCP servers are long-lived; real testing is best via an MCP client (Claude Deskt
 
 **Error**: `Error: Store 'xyz' not found`
 
-Check:
-
-* Directory exists in the docs repo
-* GitHub Actions sync workflow completed successfully
-* Workflow logs (repository → **Actions**)
-* Resources have had a few minutes to sync after a run
+**Check**:
+- Store exists in Gemini (visit [Google AI Studio](https://aistudio.google.com/))
+- Store has files uploaded
+- Store's `displayName` matches what you're querying
+- Restart the MCP server (store list is cached at startup)
 
 ### API Key Problems
 
 **Symptoms**: `UNAUTHENTICATED`, `Invalid API key`
 
-Check:
-
-* `GEMINI_API_KEY` is set in the environment / repo secrets
-* Key works at [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-* File Search API access is enabled
-* Quota not exceeded (free tier ~1500 RPD)
+**Check**:
+- `GEMINI_API_KEY` is set in environment/config
+- Key works at [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- File Search API access is enabled
+- Quota not exceeded (free tier ~1500 RPD)
 
 ### No Results
 
 **Symptoms**: `"No results found"`
 
-Try:
-
-* Broader or more precise query wording
-* Confirm files exist in the target directory
-* Confirm the latest sync completed
-* Use terms closer to the docs’ own wording
-* Ensure files use supported formats (Markdown, text, PDF, etc.)
+**Try**:
+- Broader or more precise query wording
+- Confirm files exist in the store (check Google AI Studio)
+- Confirm indexing completed successfully
+- Use terms closer to the docs' own wording
+- Ensure files use supported formats (Markdown, text, PDF, etc.)
 
 ### Rate Limits
 
 **Error**: `429`, `RESOURCE_EXHAUSTED`
 
-* Free tier: ~15 RPM
-* Wait 60 seconds before retrying
-* Reduce query rate
-* If needed, upgrade to a paid tier in the cloud console
+- Free tier: ~15 RPM
+- Wait 60 seconds before retrying
+- Reduce query rate
+- If needed, upgrade to a paid tier
 
 ### Server Not Loading in Client
 
-**Symptoms**: MCP client doesn’t show `search-context`
+**Symptoms**: MCP client doesn't show `search-context`
 
-Check:
-
-* `npm run build` completes without errors
-* MCP config JSON is valid
-* Client logs (e.g. `~/Library/Logs/Claude/mcp*.log`)
-* `npx` can access GitHub
-* Manual run works:
+**Check**:
+- `npm run build` completes without errors
+- MCP config JSON is valid
+- Client logs (e.g. `~/Library/Logs/Claude/mcp*.log`)
+- `npx` can access GitHub
+- Manual run works:
 
   ```bash
   GEMINI_API_KEY=key npx -y github:ain3sh/search-context
   ```
-
----
-
-## GitHub Actions Setup
-
-To keep stores in sync, the **docs repository** (not this server repo) needs a workflow.
-
-### Repository Secret
-
-1. Go to **Settings → Secrets and variables → Actions**
-2. Click **New repository secret**
-3. Name: `GEMINI_API_KEY`
-4. Value: your Gemini API key
-5. Click **Add secret**
-
-### Workflow File
-
-Copy or adapt `.github/workflows/sync-stores.yml` from this repo into your docs repo.
-
-To trigger manually:
-
-1. Open the **Actions** tab
-2. Select the **Sync Context Search Stores** workflow
-3. Click **Run workflow**
-4. Watch the logs for sync status and cost reporting
 
 ---
 
